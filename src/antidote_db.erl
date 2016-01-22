@@ -33,11 +33,11 @@ close(AntidoteDB) ->
     eleveldb:close(AntidoteDB).
 
 %% @doc returns the value of Key, in the antidote_db
--spec get(antidote_db(), atom() | binary()) -> term() | not_found.
+-spec get(antidote_db(), any()) -> term() | not_found.
 get(AntidoteDB, Key) ->
     AKey = case is_binary(Key) of
                true -> Key;
-               false -> atom_to_binary(Key, utf8)
+               false -> term_to_binary(Key)
            end,
     case eleveldb:get(AntidoteDB, AKey, []) of
         {ok, Res} ->
@@ -47,11 +47,11 @@ get(AntidoteDB, Key) ->
     end.
 
 %% @doc puts the Value associated to Key in eleveldb AntidoteDB
--spec put(antidote_db(), atom() | binary(), any()) -> ok | {error, any()}.
+-spec put(antidote_db(), any(), any()) -> ok | {error, any()}.
 put(AntidoteDB, Key, Value) ->
     AKey = case is_binary(Key) of
                true -> Key;
-               false -> atom_to_binary(Key, utf8)
+               false -> term_to_binary(Key)
            end,
     ATerm = case is_binary(Value) of
                 true -> Value;
