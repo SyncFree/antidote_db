@@ -59,13 +59,13 @@ put(AntidoteDB, Key, Value) ->
             end,
     eleveldb:put(AntidoteDB, AKey, ATerm, []).
 
--spec fold(antidote_db(), eleveldb:fold_fun(), any()) -> any().
-fold(AntidoteDB, Fun, Acc0) ->
-    eleveldb:fold(AntidoteDB, Fun, Acc0, []).
+-spec fold(antidote_db(), eleveldb:fold_fun(), any(), eleveldb:read_options()) -> any().
+fold(AntidoteDB, Fun, Acc0, Opts) ->
+    eleveldb:fold(AntidoteDB, Fun, Acc0, Opts).
 
--spec fold_keys(antidote_db(), eleveldb:fold_keys_fun(), any()) -> any().
-fold_keys(AntidoteDB, Fun, Acc0) ->
-    eleveldb:fold_keys(AntidoteDB, Fun, Acc0, []).
+-spec fold_keys(antidote_db(), eleveldb:fold_keys_fun(), any(), eleveldb:read_options()) -> any().
+fold_keys(AntidoteDB, Fun, Acc0, Opts) ->
+    eleveldb:fold_keys(AntidoteDB, Fun, Acc0, Opts).
 
 -spec is_empty(antidote_db()) -> boolean().
 is_empty(AntidoteDB) ->
