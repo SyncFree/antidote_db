@@ -6,8 +6,8 @@
     put/3,
     close_and_destroy/2,
     close/1,
-    fold/3,
-    fold_keys/3,
+    fold/4,
+    fold_keys/4,
     is_empty/1,
     delete/2,
     repair/1]).
