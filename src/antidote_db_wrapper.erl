@@ -77,7 +77,7 @@ get_ops(AntidoteDB, Key, VCFrom, VCTo) ->
     VCFromDict = vectorclock_to_dict(VCFrom),
     VCToDict = vectorclock_to_dict(VCTo),
     try
-        antidote_db:fold(AntidoteDB,
+        Res = antidote_db:fold(AntidoteDB,
             fun({K, V}, AccIn) ->
                 {Key1, VC1, OP} = binary_to_term(K),
                 VC1Dict = vectorclock:from_list(VC1),
@@ -95,7 +95,7 @@ get_ops(AntidoteDB, Key, VCFrom, VCTo) ->
                                     false ->
                                         case (OP == op) of
                                             true ->
-                                                AccIn ++ [binary_to_term(V)];
+                                                [binary_to_term(V) | AccIn];
                                             false ->
                                                 AccIn
                                         end
@@ -106,10 +106,13 @@ get_ops(AntidoteDB, Key, VCFrom, VCTo) ->
                 end
             end,
             [],
-            [{first_key, term_to_binary({Key})}])
+            [{first_key, term_to_binary({Key})}]),
+        %% If the fold returned without throwing a break (it iterated all
+        %% keys and ended up normally) reverse the resulting list
+        lists:reverse(Res)
     catch
         {break, OPS} ->
-            OPS;
+            lists:reverse(OPS);
         _ ->
             []
     end.
