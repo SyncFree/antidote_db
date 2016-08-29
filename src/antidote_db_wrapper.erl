@@ -89,16 +89,16 @@ get_ops(AntidoteDB, Key, VCFrom, VCTo) ->
                                 AccIn;
                             false ->
                                 %% check its an op and its commit time is in the required range
-                                case not vectorclock:lt(VC1Dict, VCFromDict) of
+                                case vectorclock:lt(VC1Dict, VCFromDict) of
                                     true ->
+                                        throw({break, AccIn});
+                                    false ->
                                         case (OP == op) of
                                             true ->
                                                 AccIn ++ [binary_to_term(V)];
                                             false ->
                                                 AccIn
-                                        end;
-                                    false ->
-                                        throw({break, AccIn})
+                                        end
                                 end
                         end;
                     false ->
