@@ -72,7 +72,7 @@ put_snapshot(AntidoteDB, Key, SnapshotTime, Snapshot) ->
     antidote_db:put(AntidoteDB, {binary_to_atom(Key), SnapshotTimeList, snap}, Snapshot).
 
 %% Returns a list of operations that have commit time in the range [VCFrom, VCTo]
--spec get_ops(antidote_db:antidote_db(), key(), vectorclock(), vectorclock()) -> list().
+-spec get_ops(antidote_db:antidote_db(), key(), vectorclock(), vectorclock()) -> [#log_record{}].
 get_ops(AntidoteDB, Key, VCFrom, VCTo) ->
     VCFromDict = vectorclock_to_dict(VCFrom),
     VCToDict = vectorclock_to_dict(VCTo),
