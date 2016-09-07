@@ -118,10 +118,10 @@ get_ops(AntidoteDB, Key, VCFrom, VCTo) ->
     end.
 
 %% Saves the operation into AntidoteDB
--spec put_op(antidote_db:antidote_db(), key(), vectorclock(), operation()) -> ok | error.
-put_op(AntidoteDB, Key, VC, Op) ->
+-spec put_op(antidote_db:antidote_db(), key(), vectorclock(), #log_record{}) -> ok | error.
+put_op(AntidoteDB, Key, VC, Record) ->
     VCList = vectorclock_to_sorted_list(VC),
-    antidote_db:put(AntidoteDB, {binary_to_atom(Key), VCList, op}, Op).
+    antidote_db:put(AntidoteDB, {binary_to_atom(Key), VCList, op}, Record).
 
 vectorclock_to_dict(VC) ->
     case is_list(VC) of
@@ -254,8 +254,8 @@ get_operations_non_empty_test() ->
     %% concurrent operations are present in the result
     O1 = get_ops(AntidoteDB, Key1, [{local, 2}, {remote, 2}], [{local, 8}, {remote, 9}]),
     O2 = get_ops(AntidoteDB, Key1, [{local, 4}, {remote, 5}], [{local, 7}, {remote, 7}]),
-    ?assertEqual([9, 8, 7, 6, 5, 4, 3, 2], O1),
-    ?assertEqual([7, 6, 5, 4], O2),
+    ?assertEqual([9, 8, 7, 6, 5, 4, 3, 2], filter_records_into_numbers(O1)),
+    ?assertEqual([7, 6, 5, 4], filter_records_into_numbers(O2)),
 
     antidote_db:close_and_destroy(AntidoteDB, "get_operations_non_empty_test").
 
@@ -278,7 +278,7 @@ operations_and_snapshots_mixed_test() ->
     ?assertEqual({ok, 5, [{local, 2}, {remote, 3}]}, {ok, Value, VCFrom}),
 
     O1 = get_ops(AntidoteDB, Key1, VCFrom, VCTo),
-    ?assertEqual([8, 7, 6, 5, 4, 3, 2], O1),
+    ?assertEqual([8, 7, 6, 5, 4, 3, 2], filter_records_into_numbers(O1)),
 
     antidote_db:close_and_destroy(AntidoteDB, "operations_and_snapshots_mixed_test").
 
@@ -291,25 +291,25 @@ length_of_vc_test() ->
     %% Same key, and same value for the local DC
     %% OP2 should be newer than op1 since it contains 1 more DC in its VC
     Key = key,
-    put_op(AntidoteDB, Key, [{local, 2}], 1),
-    put_op(AntidoteDB, Key, [{local, 2}, {remote, 3}], 2),
-    O1 = get_ops(AntidoteDB, Key, [{local, 1}, {remote, 1}], [{local, 7}, {remote, 8}]),
+    put_op(AntidoteDB, Key, [{local, 2}], #log_record{version = 1}),
+    put_op(AntidoteDB, Key, [{local, 2}, {remote, 3}], #log_record{version = 2}),
+    O1 = filter_records_into_numbers(get_ops(AntidoteDB, Key, [{local, 1}, {remote, 1}], [{local, 7}, {remote, 8}])),
     ?assertEqual([2, 1], O1),
 
     %% Insert OP3, with no remote DC value and check it´s newer than 1 and 2
-    put_op(AntidoteDB, Key, [{local, 3}], 3),
+    put_op(AntidoteDB, Key, [{local, 3}], #log_record{version = 3}),
     O2 = get_ops(AntidoteDB, Key, [{local, 1}, {remote, 1}], [{local, 7}, {remote, 8}]),
-    ?assertEqual([3, 2, 1], O2),
+    ?assertEqual([3, 2, 1], filter_records_into_numbers(O2)),
 
     %% OP3 is still returned if the local value we look for is lower
     %% This is the expected outcome for vectorclock gt and lt methods
     O3 = get_ops(AntidoteDB, Key, [{local, 1}, {remote, 1}], [{local, 2}, {remote, 8}]),
-    ?assertEqual([3, 2, 1], O3),
+    ?assertEqual([3, 2, 1], filter_records_into_numbers(O3)),
 
     %% Insert remote operation not containing local clock and check is the oldest one
-    put_op(AntidoteDB, Key, [{remote, 1}], 4),
+    put_op(AntidoteDB, Key, [{remote, 1}], #log_record{version = 4}),
     O4 = get_ops(AntidoteDB, Key, [{local, 1}, {remote, 1}], [{local, 7}, {remote, 8}]),
-    ?assertEqual([3, 2, 1, 4], O4),
+    ?assertEqual([3, 2, 1, 4], filter_records_into_numbers(O4)),
 
     antidote_db:close_and_destroy(AntidoteDB, "length_of_vc_test").
 
@@ -322,7 +322,13 @@ put_n_snapshots(AntidoteDB, Key, N) ->
 put_n_operations(_AntidoteDB, _Key, 0) ->
     ok;
 put_n_operations(AntidoteDB, Key, N) ->
-    put_op(AntidoteDB, Key, [{local, N}, {remote, N}], N),
+    %% For testing purposes, we use only the version in the record to identify
+    %% the different ops, since it's easier than reproducing the whole record
+    put_op(AntidoteDB, Key, [{local, N}, {remote, N}],
+        #log_record{version = N}),
     put_n_operations(AntidoteDB, Key, N - 1).
+
+filter_records_into_numbers(List) ->
+    lists:foldr(fun(Record, Acum) -> [Record#log_record.version | Acum] end, [], List).
 
 -endif.
