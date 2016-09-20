@@ -17,7 +17,7 @@
 %% under the License.
 %%
 %% -------------------------------------------------------------------
--module(antidote_db_wrapper).
+-module(leveldb_wrapper).
 
 -include_lib("antidote_utils/include/antidote_utils.hrl").
 
@@ -32,11 +32,11 @@
 
 %% Gets the most suitable snapshot for Key that has been committed
 %% before CommitTime. If its nothing is found, returns {error, not_found}
--spec get_snapshot(antidote_db:antidote_db(), key(),
-    snapshot_time()) -> {ok, snapshot(), snapshot_time()} | {error, not_found}.
-get_snapshot(AntidoteDB, Key, CommitTime) ->
+-spec get_snapshot(eleveldb:db_ref(), key(), snapshot_time()) ->
+    {ok, snapshot(), snapshot_time()} | {error, not_found}.
+get_snapshot(DB, Key, CommitTime) ->
     try
-        antidote_db:fold(AntidoteDB,
+        eleveldb:fold(DB,
             fun({K, V}, AccIn) ->
                 {Key1, VC, SNAP} = binary_to_term(K),
                 case (Key1 == Key) of %% check same key
@@ -69,15 +69,15 @@ get_snapshot(AntidoteDB, Key, CommitTime) ->
     snapshot()) -> ok | error.
 put_snapshot(AntidoteDB, Key, SnapshotTime, Snapshot) ->
     SnapshotTimeList = vectorclock_to_sorted_list(SnapshotTime),
-    antidote_db:put(AntidoteDB, {binary_to_atom(Key), SnapshotTimeList, snap}, Snapshot).
+    put(AntidoteDB, {binary_to_atom(Key), SnapshotTimeList, snap}, Snapshot).
 
 %% Returns a list of operations that have commit time in the range [VCFrom, VCTo]
--spec get_ops(antidote_db:antidote_db(), key(), vectorclock(), vectorclock()) -> [#log_record{}].
-get_ops(AntidoteDB, Key, VCFrom, VCTo) ->
+-spec get_ops(eleveldb:db_ref(), key(), vectorclock(), vectorclock()) -> [#log_record{}].
+get_ops(DB, Key, VCFrom, VCTo) ->
     VCFromDict = vectorclock_to_dict(VCFrom),
     VCToDict = vectorclock_to_dict(VCTo),
     try
-        Res = antidote_db:fold(AntidoteDB,
+        Res = eleveldb:fold(DB,
             fun({K, V}, AccIn) ->
                 {Key1, VC1, OP} = binary_to_term(K),
                 VC1Dict = vectorclock:from_list(VC1),
@@ -118,10 +118,10 @@ get_ops(AntidoteDB, Key, VCFrom, VCTo) ->
     end.
 
 %% Saves the operation into AntidoteDB
--spec put_op(antidote_db:antidote_db(), key(), vectorclock(), #log_record{}) -> ok | error.
-put_op(AntidoteDB, Key, VC, Record) ->
+-spec put_op(eleveldb:db_ref(), key(), vectorclock(), #log_record{}) -> ok | error.
+put_op(DB, Key, VC, Record) ->
     VCList = vectorclock_to_sorted_list(VC),
-    antidote_db:put(AntidoteDB, {binary_to_atom(Key), VCList, op}, Record).
+    put(DB, {binary_to_atom(Key), VCList, op}, Record).
 
 vectorclock_to_dict(VC) ->
     case is_list(VC) of
@@ -144,6 +144,19 @@ binary_to_atom(Key) ->
         false -> Key
     end.
 
+%% @doc puts the Value associated to Key in eleveldb AntidoteDB
+-spec put(eleveldb:db_ref(), any(), any()) -> ok | {error, any()}.
+put(DB, Key, Value) ->
+    AKey = case is_binary(Key) of
+               true -> Key;
+               false -> term_to_binary(Key)
+           end,
+    ATerm = case is_binary(Value) of
+                true -> Value;
+                false -> term_to_binary(Value)
+            end,
+    eleveldb:put(DB, AKey, ATerm, []).
+
 -ifdef(TEST).
 
 %% This test ensures vectorclock_to_list method
@@ -154,42 +167,44 @@ vectorclock_to_sorted_list_test() ->
 
 get_snapshot_not_found_test() ->
     eleveldb:destroy("get_snapshot_not_found_test", []),
-    {ok, AntidoteDB} = antidote_db:new("get_snapshot_not_found_test"),
+    {ok, AntidoteDB} = antidote_db:new("get_snapshot_not_found_test", leveldb),
+    {leveldb, DB} = AntidoteDB,
 
     Key = key,
     Key1 = key1,
     Key2 = key2,
     %% No snapshot in the DB
-    NotFound = get_snapshot(AntidoteDB, Key, vectorclock:from_list([{local, 0}, {remote, 0}])),
+    NotFound = get_snapshot(DB, Key, vectorclock:from_list([{local, 0}, {remote, 0}])),
     ?assertEqual({error, not_found}, NotFound),
 
     %% Put 10 snapshots for Key and check there is no snapshot with time 0 in both DCs
-    put_n_snapshots(AntidoteDB, Key, 10),
-    NotFound1 = get_snapshot(AntidoteDB, Key, vectorclock:from_list([{local, 0}, {remote, 0}])),
+    put_n_snapshots(DB, Key, 10),
+    NotFound1 = get_snapshot(DB, Key, vectorclock:from_list([{local, 0}, {remote, 0}])),
     ?assertEqual({error, not_found}, NotFound1),
 
     %% Look for a snapshot for Key1
-    S1 = get_snapshot(AntidoteDB, Key1, vectorclock:from_list([{local, 5}, {remote, 4}])),
+    S1 = get_snapshot(DB, Key1, vectorclock:from_list([{local, 5}, {remote, 4}])),
     ?assertEqual({error, not_found}, S1),
 
     %% Put snapshots for Key2 and look for a snapshot for Key1
-    put_n_snapshots(AntidoteDB, Key2, 10),
-    S2 = get_snapshot(AntidoteDB, Key1, vectorclock:from_list([{local, 5}, {remote, 4}])),
+    put_n_snapshots(DB, Key2, 10),
+    S2 = get_snapshot(DB, Key1, vectorclock:from_list([{local, 5}, {remote, 4}])),
     ?assertEqual({error, not_found}, S2),
 
     antidote_db:close_and_destroy(AntidoteDB, "get_snapshot_not_found_test").
 
 get_snapshot_matching_vc_test() ->
     eleveldb:destroy("get_snapshot_matching_vc_test", []),
-    {ok, AntidoteDB} = antidote_db:new("get_snapshot_matching_vc_test"),
+    {ok, AntidoteDB} = antidote_db:new("get_snapshot_matching_vc_test", leveldb),
+    {leveldb, DB} = AntidoteDB,
 
     Key = key,
-    put_n_snapshots(AntidoteDB, Key, 10),
+    put_n_snapshots(DB, Key, 10),
 
     %% get some of the snapshots inserted (matches VC)
-    S1 = get_snapshot(AntidoteDB, Key, vectorclock:from_list([{local, 1}, {remote, 1}])),
-    S2 = get_snapshot(AntidoteDB, Key, vectorclock:from_list([{local, 4}, {remote, 4}])),
-    S3 = get_snapshot(AntidoteDB, Key, vectorclock:from_list([{local, 8}, {remote, 8}])),
+    S1 = get_snapshot(DB, Key, vectorclock:from_list([{local, 1}, {remote, 1}])),
+    S2 = get_snapshot(DB, Key, vectorclock:from_list([{local, 4}, {remote, 4}])),
+    S3 = get_snapshot(DB, Key, vectorclock:from_list([{local, 8}, {remote, 8}])),
     ?assertEqual({ok, 1, [{local, 1}, {remote, 1}]}, S1),
     ?assertEqual({ok, 4, [{local, 4}, {remote, 4}]}, S2),
     ?assertEqual({ok, 8, [{local, 8}, {remote, 8}]}, S3),
@@ -199,15 +214,16 @@ get_snapshot_matching_vc_test() ->
 
 get_snapshot_not_matching_vc_test() ->
     eleveldb:destroy("get_snapshot_not_matching_vc_test", []),
-    {ok, AntidoteDB} = antidote_db:new("get_snapshot_not_matching_vc_test"),
+    {ok, AntidoteDB} = antidote_db:new("get_snapshot_not_matching_vc_test", leveldb),
+    {leveldb, DB} = AntidoteDB,
 
     Key = key,
-    put_n_snapshots(AntidoteDB, Key, 10),
+    put_n_snapshots(DB, Key, 10),
 
     %% get snapshots with different times in their DCs
-    S4 = get_snapshot(AntidoteDB, Key, vectorclock:from_list([{local, 1}, {remote, 0}])),
-    S5 = get_snapshot(AntidoteDB, Key, vectorclock:from_list([{local, 5}, {remote, 4}])),
-    S6 = get_snapshot(AntidoteDB, Key, vectorclock:from_list([{local, 8}, {remote, 9}])),
+    S4 = get_snapshot(DB, Key, vectorclock:from_list([{local, 1}, {remote, 0}])),
+    S5 = get_snapshot(DB, Key, vectorclock:from_list([{local, 5}, {remote, 4}])),
+    S6 = get_snapshot(DB, Key, vectorclock:from_list([{local, 8}, {remote, 9}])),
     ?assertEqual({error, not_found}, S4),
     ?assertEqual({ok, 4, [{local, 4}, {remote, 4}]}, S5),
     ?assertEqual({ok, 8, [{local, 8}, {remote, 8}]}, S6),
@@ -216,24 +232,25 @@ get_snapshot_not_matching_vc_test() ->
 
 get_operations_empty_result_test() ->
     eleveldb:destroy("get_operations_not_found_test", []),
-    {ok, AntidoteDB} = antidote_db:new("get_operations_not_found_test"),
+    {ok, AntidoteDB} = antidote_db:new("get_operations_not_found_test", leveldb),
+    {leveldb, DB} = AntidoteDB,
     Key = key,
     Key1 = key1,
     %% Nothing in the DB yet return empty list
-    O1 = get_ops(AntidoteDB, Key, [{local, 2}, {remote, 2}], [{local, 8}, {remote, 9}]),
+    O1 = get_ops(DB, Key, [{local, 2}, {remote, 2}], [{local, 8}, {remote, 9}]),
     ?assertEqual([], O1),
 
-    put_n_operations(AntidoteDB, Key, 10),
+    put_n_operations(DB, Key, 10),
     %% Getting something out of range returns an empty list
-    O2 = get_ops(AntidoteDB, Key, [{local, 123}, {remote, 100}], [{local, 200}, {remote, 124}]),
+    O2 = get_ops(DB, Key, [{local, 123}, {remote, 100}], [{local, 200}, {remote, 124}]),
     ?assertEqual([], O2),
 
     %% Getting a key not present, returns an empty list
-    O3 = get_ops(AntidoteDB, Key1, [{local, 2}, {remote, 2}], [{local, 4}, {remote, 5}]),
+    O3 = get_ops(DB, Key1, [{local, 2}, {remote, 2}], [{local, 4}, {remote, 5}]),
     ?assertEqual([], O3),
 
     %% Searching for the same range returns an empty list
-    O4 = get_ops(AntidoteDB, Key1, [{local, 2}, {remote, 2}], [{local, 2}, {remote, 2}]),
+    O4 = get_ops(DB, Key1, [{local, 2}, {remote, 2}], [{local, 2}, {remote, 2}]),
     ?assertEqual([], O4),
 
     antidote_db:close_and_destroy(AntidoteDB, "get_operations_not_found_test").
@@ -241,19 +258,20 @@ get_operations_empty_result_test() ->
 
 get_operations_non_empty_test() ->
     eleveldb:destroy("get_operations_non_empty_test", []),
-    {ok, AntidoteDB} = antidote_db:new("get_operations_non_empty_test"),
+    {ok, AntidoteDB} = antidote_db:new("get_operations_non_empty_test", leveldb),
+    {leveldb, DB} = AntidoteDB,
 
     %% Fill the DB with values
     Key = key,
     Key1 = key1,
     Key2 = key2,
-    put_n_operations(AntidoteDB, Key, 100),
-    put_n_operations(AntidoteDB, Key1, 10),
-    put_n_operations(AntidoteDB, Key2, 25),
+    put_n_operations(DB, Key, 100),
+    put_n_operations(DB, Key1, 10),
+    put_n_operations(DB, Key2, 25),
 
     %% concurrent operations are present in the result
-    O1 = get_ops(AntidoteDB, Key1, [{local, 2}, {remote, 2}], [{local, 8}, {remote, 9}]),
-    O2 = get_ops(AntidoteDB, Key1, [{local, 4}, {remote, 5}], [{local, 7}, {remote, 7}]),
+    O1 = get_ops(DB, Key1, [{local, 2}, {remote, 2}], [{local, 8}, {remote, 9}]),
+    O2 = get_ops(DB, Key1, [{local, 4}, {remote, 5}], [{local, 7}, {remote, 7}]),
     ?assertEqual([9, 8, 7, 6, 5, 4, 3, 2], filter_records_into_numbers(O1)),
     ?assertEqual([7, 6, 5, 4], filter_records_into_numbers(O2)),
 
@@ -261,23 +279,24 @@ get_operations_non_empty_test() ->
 
 operations_and_snapshots_mixed_test() ->
     eleveldb:destroy("operations_and_snapshots_mixed_test", []),
-    {ok, AntidoteDB} = antidote_db:new("operations_and_snapshots_mixed_test"),
+    {ok, AntidoteDB} = antidote_db:new("operations_and_snapshots_mixed_test", leveldb),
+    {leveldb, DB} = AntidoteDB,
 
     Key = key,
     Key1 = key1,
     Key2 = key2,
     VCTo = [{local, 7}, {remote, 8}],
-    put_n_operations(AntidoteDB, Key, 10),
-    put_n_operations(AntidoteDB, Key1, 20),
-    put_snapshot(AntidoteDB, Key1, [{local, 2}, {remote, 3}], 5),
-    put_n_operations(AntidoteDB, Key2, 8),
+    put_n_operations(DB, Key, 10),
+    put_n_operations(DB, Key1, 20),
+    put_snapshot(DB, Key1, [{local, 2}, {remote, 3}], 5),
+    put_n_operations(DB, Key2, 8),
 
     %% We want all ops for Key1 that are between the snapshot and
     %% [{local, 7}, {remote, 8}]. First get the snapshot, then OPS.
-    {ok, Value, VCFrom} = get_snapshot(AntidoteDB, Key1, vectorclock:from_list(VCTo)),
+    {ok, Value, VCFrom} = get_snapshot(DB, Key1, vectorclock:from_list(VCTo)),
     ?assertEqual({ok, 5, [{local, 2}, {remote, 3}]}, {ok, Value, VCFrom}),
 
-    O1 = get_ops(AntidoteDB, Key1, VCFrom, VCTo),
+    O1 = get_ops(DB, Key1, VCFrom, VCTo),
     ?assertEqual([8, 7, 6, 5, 4, 3, 2], filter_records_into_numbers(O1)),
 
     antidote_db:close_and_destroy(AntidoteDB, "operations_and_snapshots_mixed_test").
@@ -286,47 +305,48 @@ operations_and_snapshots_mixed_test() ->
 %% with VCs containing != lengths and values
 length_of_vc_test() ->
     eleveldb:destroy("length_of_vc_test", []),
-    {ok, AntidoteDB} = antidote_db:new("length_of_vc_test"),
+    {ok, AntidoteDB} = antidote_db:new("length_of_vc_test", leveldb),
+    {leveldb, DB} = AntidoteDB,
 
     %% Same key, and same value for the local DC
     %% OP2 should be newer than op1 since it contains 1 more DC in its VC
     Key = key,
-    put_op(AntidoteDB, Key, [{local, 2}], #log_record{version = 1}),
-    put_op(AntidoteDB, Key, [{local, 2}, {remote, 3}], #log_record{version = 2}),
-    O1 = filter_records_into_numbers(get_ops(AntidoteDB, Key, [{local, 1}, {remote, 1}], [{local, 7}, {remote, 8}])),
+    put_op(DB, Key, [{local, 2}], #log_record{version = 1}),
+    put_op(DB, Key, [{local, 2}, {remote, 3}], #log_record{version = 2}),
+    O1 = filter_records_into_numbers(get_ops(DB, Key, [{local, 1}, {remote, 1}], [{local, 7}, {remote, 8}])),
     ?assertEqual([2, 1], O1),
 
     %% Insert OP3, with no remote DC value and check it´s newer than 1 and 2
-    put_op(AntidoteDB, Key, [{local, 3}], #log_record{version = 3}),
-    O2 = get_ops(AntidoteDB, Key, [{local, 1}, {remote, 1}], [{local, 7}, {remote, 8}]),
+    put_op(DB, Key, [{local, 3}], #log_record{version = 3}),
+    O2 = get_ops(DB, Key, [{local, 1}, {remote, 1}], [{local, 7}, {remote, 8}]),
     ?assertEqual([3, 2, 1], filter_records_into_numbers(O2)),
 
     %% OP3 is still returned if the local value we look for is lower
     %% This is the expected outcome for vectorclock gt and lt methods
-    O3 = get_ops(AntidoteDB, Key, [{local, 1}, {remote, 1}], [{local, 2}, {remote, 8}]),
+    O3 = get_ops(DB, Key, [{local, 1}, {remote, 1}], [{local, 2}, {remote, 8}]),
     ?assertEqual([3, 2, 1], filter_records_into_numbers(O3)),
 
     %% Insert remote operation not containing local clock and check is the oldest one
-    put_op(AntidoteDB, Key, [{remote, 1}], #log_record{version = 4}),
-    O4 = get_ops(AntidoteDB, Key, [{local, 1}, {remote, 1}], [{local, 7}, {remote, 8}]),
+    put_op(DB, Key, [{remote, 1}], #log_record{version = 4}),
+    O4 = get_ops(DB, Key, [{local, 1}, {remote, 1}], [{local, 7}, {remote, 8}]),
     ?assertEqual([3, 2, 1, 4], filter_records_into_numbers(O4)),
 
     antidote_db:close_and_destroy(AntidoteDB, "length_of_vc_test").
 
-put_n_snapshots(_AntidoteDB, _Key, 0) ->
+put_n_snapshots(_DB, _Key, 0) ->
     ok;
-put_n_snapshots(AntidoteDB, Key, N) ->
-    put_snapshot(AntidoteDB, Key, [{local, N}, {remote, N}], N),
-    put_n_snapshots(AntidoteDB, Key, N - 1).
+put_n_snapshots(DB, Key, N) ->
+    put_snapshot(DB, Key, [{local, N}, {remote, N}], N),
+    put_n_snapshots(DB, Key, N - 1).
 
-put_n_operations(_AntidoteDB, _Key, 0) ->
+put_n_operations(_DB, _Key, 0) ->
     ok;
-put_n_operations(AntidoteDB, Key, N) ->
+put_n_operations(DB, Key, N) ->
     %% For testing purposes, we use only the version in the record to identify
     %% the different ops, since it's easier than reproducing the whole record
-    put_op(AntidoteDB, Key, [{local, N}, {remote, N}],
+    put_op(DB, Key, [{local, N}, {remote, N}],
         #log_record{version = N}),
-    put_n_operations(AntidoteDB, Key, N - 1).
+    put_n_operations(DB, Key, N - 1).
 
 filter_records_into_numbers(List) ->
     lists:foldr(fun(Record, Acum) -> [Record#log_record.version | Acum] end, [], List).

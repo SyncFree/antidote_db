@@ -20,80 +20,98 @@
 
 -module(antidote_db).
 
+-include_lib("antidote_utils/include/antidote_utils.hrl").
+
 -export([
-    new/1,
-    get/2,
-    put/3,
+    new/2,
     close_and_destroy/2,
     close/1,
-    fold/4,
-    fold_keys/4,
-    is_empty/1,
-    delete/2,
-    repair/1]).
+    get_snapshot/3,
+    put_snapshot/4,
+    get_ops/4,
+    put_op/4]).
 
--type antidote_db() :: eleveldb:db_ref().
+-type antidote_db() :: {leveldb, eleveldb:db_ref()}.
 
--export_type([antidote_db/0]).
+-type antidote_db_type() :: leveldb.
 
-%% Given a name, returns a new AntidoteDB (ElevelDB)
-%% OpenOptions are set to use Antidote special comparator
--spec new(atom()) -> {ok, antidote_db()} | {error, any()}.
-new(Name) ->
-    eleveldb:open(Name, [{create_if_missing, true}, {antidote, true}]).
+-export_type([antidote_db/0, antidote_db_type/0]).
+
+%% Given a name, returns a new AntidoteDB (for now, only ElevelDB is supported)
+%% OpenOptions are set to use Antidote special comparator in the case of Eleveldb
+-spec new(atom(), antidote_db_type()) -> {ok, antidote_db()} | {error, any()}.
+new(Name, Type) ->
+    case Type of
+        leveldb ->
+            {ok, Ref} = eleveldb:open(Name, [{create_if_missing, true}, {antidote, true}]),
+            {ok, {leveldb, Ref}};
+        _ ->
+            {error, type_not_supported}
+    end.
+
 
 %% Closes and destroys the given base
 -spec close_and_destroy(antidote_db(), atom()) -> ok | {error, any()}.
-close_and_destroy(AntidoteDB, Name) ->
-    eleveldb:close(AntidoteDB),
-    eleveldb:destroy(Name, []).
-
--spec close(antidote_db()) -> ok | {error, any()}.
-close(AntidoteDB) ->
-    eleveldb:close(AntidoteDB).
-
-%% @doc returns the value of Key, in the antidote_db
--spec get(antidote_db(), any()) -> term() | not_found.
-get(AntidoteDB, Key) ->
-    AKey = case is_binary(Key) of
-               true -> Key;
-               false -> term_to_binary(Key)
-           end,
-    case eleveldb:get(AntidoteDB, AKey, []) of
-        {ok, Res} ->
-            binary_to_term(Res);
-        not_found ->
-            not_found
+close_and_destroy({Type, DB}, Name) ->
+    case Type of
+        leveldb ->
+            eleveldb:close(DB),
+            eleveldb:destroy(Name, []);
+        _ ->
+            {error, type_not_supported}
     end.
 
-%% @doc puts the Value associated to Key in eleveldb AntidoteDB
--spec put(antidote_db(), any(), any()) -> ok | {error, any()}.
-put(AntidoteDB, Key, Value) ->
-    AKey = case is_binary(Key) of
-               true -> Key;
-               false -> term_to_binary(Key)
-           end,
-    ATerm = case is_binary(Value) of
-                true -> Value;
-                false -> term_to_binary(Value)
-            end,
-    eleveldb:put(AntidoteDB, AKey, ATerm, []).
+-spec close(antidote_db()) -> ok | {error, any()}.
+close({Type, DB}) ->
+    case Type of
+        leveldb ->
+            eleveldb:close(DB);
+        _ ->
+            {error, type_not_supported}
+    end.
 
--spec fold(antidote_db(), eleveldb:fold_fun(), any(), eleveldb:read_options()) -> any().
-fold(AntidoteDB, Fun, Acc0, Opts) ->
-    eleveldb:fold(AntidoteDB, Fun, Acc0, Opts).
+%% Gets the most suitable snapshot for Key that has been committed
+%% before CommitTime. If its nothing is found, returns {error, not_found}
+-spec get_snapshot(antidote_db:antidote_db(), key(),
+    snapshot_time()) -> {ok, snapshot(), snapshot_time()} | {error, not_found}.
+get_snapshot({Type, DB}, Key, CommitTime) ->
+    case Type of
+        leveldb ->
+            leveldb_wrapper:get_snapshot(DB, Key, CommitTime);
+        _ ->
+            {error, type_not_supported}
+    end.
 
--spec fold_keys(antidote_db(), eleveldb:fold_keys_fun(), any(), eleveldb:read_options()) -> any().
-fold_keys(AntidoteDB, Fun, Acc0, Opts) ->
-    eleveldb:fold_keys(AntidoteDB, Fun, Acc0, Opts).
+%% Saves the snapshot into AntidoteDB
+-spec put_snapshot(antidote_db:antidote_db(), key(), snapshot_time(),
+    snapshot()) -> ok | error.
+put_snapshot({Type, DB}, Key, SnapshotTime, Snapshot) ->
+    case Type of
+        leveldb ->
+            leveldb_wrapper:put_snapshot(DB, Key, SnapshotTime, Snapshot);
+        _ ->
+            {error, type_not_supported}
+    end.
 
--spec is_empty(antidote_db()) -> boolean().
-is_empty(AntidoteDB) ->
-    eleveldb:is_empty(AntidoteDB).
+%% Returns a list of operations that have commit time in the range [VCFrom, VCTo]
+-spec get_ops(antidote_db:antidote_db(), key(), vectorclock(), vectorclock()) -> [#log_record{}].
+get_ops({Type, DB}, Key, VCFrom, VCTo) ->
+    case Type of
+        leveldb ->
+            leveldb_wrapper:get_ops(DB, Key, VCFrom, VCTo);
+        _ ->
+            {error, type_not_supported}
+    end.
 
-repair(Name) ->
-    eleveldb:repair(Name, []).
 
--spec delete(antidote_db(), binary()) -> ok | {error, any()}.
-delete(AntidoteDB, Key) ->
-    eleveldb:delete(AntidoteDB, Key, []).
+%% Saves the operation into AntidoteDB
+-spec put_op(antidote_db:antidote_db(), key(), vectorclock(), #log_record{}) -> ok | error.
+put_op({Type, DB}, Key, VC, Record) ->
+    case Type of
+        leveldb ->
+            leveldb_wrapper:put_op(DB, Key, VC, Record);
+        _ ->
+            {error, type_not_supported}
+    end.
+
+
