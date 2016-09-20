@@ -37,6 +37,10 @@
 
 -export_type([antidote_db/0, antidote_db_type/0]).
 
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+-endif.
+
 %% Given a name, returns a new AntidoteDB (for now, only ElevelDB is supported)
 %% OpenOptions are set to use Antidote special comparator in the case of Eleveldb
 -spec new(atom(), antidote_db_type()) -> {ok, antidote_db()} | {error, any()}.
@@ -115,3 +119,15 @@ put_op({Type, DB}, Key, VC, Record) ->
     end.
 
 
+-ifdef(TEST).
+
+wrong_types_test() ->
+    ?assertEqual({error, type_not_supported}, new("TEST", type)),
+    ?assertEqual({error, type_not_supported}, close_and_destroy({type, db}, name)),
+    ?assertEqual({error, type_not_supported}, close({type, db})),
+    ?assertEqual({error, type_not_supported}, get_snapshot({type, db}, key, [])),
+    ?assertEqual({error, type_not_supported}, put_snapshot({type, db}, key, [], [])),
+    ?assertEqual({error, type_not_supported}, get_ops({type, db}, key, [], [])),
+    ?assertEqual({error, type_not_supported}, put_op({type, db}, key, [], [])).
+
+-endif.
