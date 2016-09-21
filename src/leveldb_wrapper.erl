@@ -22,7 +22,7 @@
 -include_lib("antidote_utils/include/antidote_utils.hrl").
 
 -export([get_snapshot/3,
-    put_snapshot/4,
+    put_snapshot/3,
     get_ops/4,
     put_op/4]).
 
@@ -33,7 +33,7 @@
 %% Gets the most suitable snapshot for Key that has been committed
 %% before CommitTime. If its nothing is found, returns {error, not_found}
 -spec get_snapshot(eleveldb:db_ref(), key(), snapshot_time()) ->
-    {ok, snapshot(), snapshot_time()} | {error, not_found}.
+    {ok, #materialized_snapshot{}} | {error, not_found}.
 get_snapshot(DB, Key, CommitTime) ->
     try
         eleveldb:fold(DB,
@@ -46,7 +46,7 @@ get_snapshot(DB, Key, CommitTime) ->
                             vectorclock:le(vectorclock:from_list(VC), CommitTime) of
                             true ->
                                 Snapshot = binary_to_term(V),
-                                throw({break, Snapshot, VC});
+                                throw({break, Snapshot});
                             _ ->
                                 AccIn
                         end;
@@ -58,17 +58,16 @@ get_snapshot(DB, Key, CommitTime) ->
             [{first_key, term_to_binary({Key})}]),
         {error, not_found}
     catch
-        {break, SNAP, VC} ->
-            {ok, SNAP, VC};
+        {break, SNAP} ->
+            {ok, SNAP};
         _ ->
             {error, not_found}
     end.
 
 %% Saves the snapshot into AntidoteDB
--spec put_snapshot(antidote_db:antidote_db(), key(), snapshot_time(),
-    snapshot()) -> ok | error.
-put_snapshot(AntidoteDB, Key, SnapshotTime, Snapshot) ->
-    SnapshotTimeList = vectorclock_to_sorted_list(SnapshotTime),
+-spec put_snapshot(antidote_db:antidote_db(), key(), #materialized_snapshot{}) -> ok | error.
+put_snapshot(AntidoteDB, Key, Snapshot) ->
+    SnapshotTimeList = vectorclock_to_sorted_list(Snapshot#materialized_snapshot.snapshot_time),
     put(AntidoteDB, {binary_to_atom(Key), SnapshotTimeList, snap}, Snapshot).
 
 %% Returns a list of operations that have commit time in the range [VCFrom, VCTo]
@@ -133,7 +132,7 @@ vectorclock_to_dict(VC) ->
 vectorclock_to_sorted_list(VC) ->
     case is_list(VC) of
         true -> lists:sort(VC);
-        false -> lists:sort(vectorclock:to_list(VC))
+        false -> lists:sort(dict:to_list(VC))
     end.
 
 %% Workaround for basho bench
@@ -202,12 +201,15 @@ get_snapshot_matching_vc_test() ->
     put_n_snapshots(DB, Key, 10),
 
     %% get some of the snapshots inserted (matches VC)
-    S1 = get_snapshot(DB, Key, vectorclock:from_list([{local, 1}, {remote, 1}])),
-    S2 = get_snapshot(DB, Key, vectorclock:from_list([{local, 4}, {remote, 4}])),
-    S3 = get_snapshot(DB, Key, vectorclock:from_list([{local, 8}, {remote, 8}])),
-    ?assertEqual({ok, 1, [{local, 1}, {remote, 1}]}, S1),
-    ?assertEqual({ok, 4, [{local, 4}, {remote, 4}]}, S2),
-    ?assertEqual({ok, 8, [{local, 8}, {remote, 8}]}, S3),
+    {ok, S1} = get_snapshot(DB, Key, vectorclock:from_list([{local, 1}, {remote, 1}])),
+    {ok, S2} = get_snapshot(DB, Key, vectorclock:from_list([{local, 4}, {remote, 4}])),
+    {ok, S3} = get_snapshot(DB, Key, vectorclock:from_list([{local, 8}, {remote, 8}])),
+    ?assertEqual([{local, 1}, {remote, 1}], vectorclock_to_sorted_list(S1#materialized_snapshot.snapshot_time)),
+    ?assertEqual(1, S1#materialized_snapshot.value),
+    ?assertEqual([{local, 4}, {remote, 4}], vectorclock_to_sorted_list(S2#materialized_snapshot.snapshot_time)),
+    ?assertEqual(4, S2#materialized_snapshot.value),
+    ?assertEqual([{local, 8}, {remote, 8}], vectorclock_to_sorted_list(S3#materialized_snapshot.snapshot_time)),
+    ?assertEqual(8, S3#materialized_snapshot.value),
 
     antidote_db:close_and_destroy(AntidoteDB, "get_snapshot_matching_vc_test").
 
@@ -222,11 +224,13 @@ get_snapshot_not_matching_vc_test() ->
 
     %% get snapshots with different times in their DCs
     S4 = get_snapshot(DB, Key, vectorclock:from_list([{local, 1}, {remote, 0}])),
-    S5 = get_snapshot(DB, Key, vectorclock:from_list([{local, 5}, {remote, 4}])),
-    S6 = get_snapshot(DB, Key, vectorclock:from_list([{local, 8}, {remote, 9}])),
+    {ok, S5} = get_snapshot(DB, Key, vectorclock:from_list([{local, 5}, {remote, 4}])),
+    {ok, S6} = get_snapshot(DB, Key, vectorclock:from_list([{local, 8}, {remote, 9}])),
     ?assertEqual({error, not_found}, S4),
-    ?assertEqual({ok, 4, [{local, 4}, {remote, 4}]}, S5),
-    ?assertEqual({ok, 8, [{local, 8}, {remote, 8}]}, S6),
+    ?assertEqual([{local, 4}, {remote, 4}], vectorclock_to_sorted_list(S5#materialized_snapshot.snapshot_time)),
+    ?assertEqual(4, S5#materialized_snapshot.value),
+    ?assertEqual([{local, 8}, {remote, 8}], vectorclock_to_sorted_list(S6#materialized_snapshot.snapshot_time)),
+    ?assertEqual(8, S6#materialized_snapshot.value),
 
     antidote_db:close_and_destroy(AntidoteDB, "get_snapshot_not_matching_vc_test").
 
@@ -288,15 +292,16 @@ operations_and_snapshots_mixed_test() ->
     VCTo = [{local, 7}, {remote, 8}],
     put_n_operations(DB, Key, 10),
     put_n_operations(DB, Key1, 20),
-    put_snapshot(DB, Key1, [{local, 2}, {remote, 3}], 5),
+    put_snapshot(DB, Key1, #materialized_snapshot{snapshot_time = [{local, 2}, {remote, 3}], value = 5}),
     put_n_operations(DB, Key2, 8),
 
     %% We want all ops for Key1 that are between the snapshot and
     %% [{local, 7}, {remote, 8}]. First get the snapshot, then OPS.
-    {ok, Value, VCFrom} = get_snapshot(DB, Key1, vectorclock:from_list(VCTo)),
-    ?assertEqual({ok, 5, [{local, 2}, {remote, 3}]}, {ok, Value, VCFrom}),
+    {ok, Snapshot} = get_snapshot(DB, Key1, vectorclock:from_list(VCTo)),
+    ?assertEqual([{local, 2}, {remote, 3}], vectorclock_to_sorted_list(Snapshot#materialized_snapshot.snapshot_time)),
+    ?assertEqual(5, Snapshot#materialized_snapshot.value),
 
-    O1 = get_ops(DB, Key1, VCFrom, VCTo),
+    O1 = get_ops(DB, Key1, Snapshot#materialized_snapshot.snapshot_time, VCTo),
     ?assertEqual([8, 7, 6, 5, 4, 3, 2], filter_records_into_numbers(O1)),
 
     antidote_db:close_and_destroy(AntidoteDB, "operations_and_snapshots_mixed_test").
@@ -336,7 +341,8 @@ length_of_vc_test() ->
 put_n_snapshots(_DB, _Key, 0) ->
     ok;
 put_n_snapshots(DB, Key, N) ->
-    put_snapshot(DB, Key, [{local, N}, {remote, N}], N),
+    VC = vectorclock:from_list([{local, N}, {remote, N}]),
+    put_snapshot(DB, Key, #materialized_snapshot{snapshot_time = VC, value = N}),
     put_n_snapshots(DB, Key, N - 1).
 
 put_n_operations(_DB, _Key, 0) ->

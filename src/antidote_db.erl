@@ -27,7 +27,7 @@
     close_and_destroy/2,
     close/1,
     get_snapshot/3,
-    put_snapshot/4,
+    put_snapshot/3,
     get_ops/4,
     put_op/4]).
 
@@ -77,7 +77,7 @@ close({Type, DB}) ->
 %% Gets the most suitable snapshot for Key that has been committed
 %% before CommitTime. If its nothing is found, returns {error, not_found}
 -spec get_snapshot(antidote_db:antidote_db(), key(),
-    snapshot_time()) -> {ok, snapshot(), snapshot_time()} | {error, not_found}.
+    snapshot_time()) -> {ok, #materialized_snapshot{}} | {error, not_found}.
 get_snapshot({Type, DB}, Key, CommitTime) ->
     case Type of
         leveldb ->
@@ -87,12 +87,11 @@ get_snapshot({Type, DB}, Key, CommitTime) ->
     end.
 
 %% Saves the snapshot into AntidoteDB
--spec put_snapshot(antidote_db:antidote_db(), key(), snapshot_time(),
-    snapshot()) -> ok | error.
-put_snapshot({Type, DB}, Key, SnapshotTime, Snapshot) ->
+-spec put_snapshot(antidote_db:antidote_db(), key(), #materialized_snapshot{}) -> ok | error.
+put_snapshot({Type, DB}, Key, Snapshot) ->
     case Type of
         leveldb ->
-            leveldb_wrapper:put_snapshot(DB, Key, SnapshotTime, Snapshot);
+            leveldb_wrapper:put_snapshot(DB, Key, Snapshot);
         _ ->
             {error, type_not_supported}
     end.
@@ -126,7 +125,7 @@ wrong_types_test() ->
     ?assertEqual({error, type_not_supported}, close_and_destroy({type, db}, name)),
     ?assertEqual({error, type_not_supported}, close({type, db})),
     ?assertEqual({error, type_not_supported}, get_snapshot({type, db}, key, [])),
-    ?assertEqual({error, type_not_supported}, put_snapshot({type, db}, key, [], [])),
+    ?assertEqual({error, type_not_supported}, put_snapshot({type, db}, key, [])),
     ?assertEqual({error, type_not_supported}, get_ops({type, db}, key, [], [])),
     ?assertEqual({error, type_not_supported}, put_op({type, db}, key, [], [])).
 
