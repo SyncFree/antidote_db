@@ -21,7 +21,9 @@
 
 -include_lib("antidote_utils/include/antidote_utils.hrl").
 
--export([get_snapshot/3,
+-export([
+    get_ops_applicable_to_snapshot/3,
+    get_snapshot/3,
     put_snapshot/3,
     get_ops/4,
     put_op/4]).
@@ -29,6 +31,48 @@
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 -endif.
+
+
+%% Given a key and a VC, this method returns the most suitable snapshot committed before the VC
+%% with a list of operations in the range [SnapshotCommitTime, VC) to be applied to the mentioned
+%% snapshot to generate a new one.
+-spec get_ops_applicable_to_snapshot(eleveldb:db_ref(), key(), vectorclock()) ->
+    {ok, #materialized_snapshot{} | not_found, [#log_record{}]}.
+get_ops_applicable_to_snapshot(DB, Key, VectorClock) ->
+    try
+        Res = eleveldb:fold(DB,
+            fun({K, V}, AccIn) ->
+                {Key1, VC1, OP} = binary_to_term(K),
+                VC1Dict = vectorclock:from_list(VC1),
+                case Key == Key1 of %% check same key
+                    true ->
+                        %% if its greater, continue
+                        case vectorclock:strict_ge(VC1Dict, VectorClock) of
+                            true ->
+                                AccIn;
+                            false ->
+                                case (OP == op) of
+                                    true ->
+                                        [binary_to_term(V) | AccIn];
+                                    false ->
+                                        throw({break, binary_to_term(V), AccIn})
+                                end
+                        end;
+                    false ->
+                        throw({break, not_found, AccIn})
+                end
+            end,
+            [],
+            [{first_key, term_to_binary({Key})}]),
+        %% If the fold returned without throwing a break (it iterated all
+        %% keys and ended up normally) reverse the resulting list
+        {ok, not_found, lists:reverse(Res)}
+    catch
+        {break, Snapshot, OPS} ->
+            {ok, Snapshot, lists:reverse(OPS)};
+        _ ->
+            {error, not_found}
+    end.
 
 %% Gets the most suitable snapshot for Key that has been committed
 %% before CommitTime. If its nothing is found, returns {error, not_found}
@@ -166,6 +210,48 @@ put(DB, Key, Value) ->
 vectorclock_to_sorted_list_test() ->
     Sorted = vectorclock_to_sorted_list([{e, 5}, {c, 3}, {a, 1}, {b, 2}, {d, 4}]),
     ?assertEqual([{a, 1}, {b, 2}, {c, 3}, {d, 4}, {e, 5}], Sorted).
+
+get_ops_applicable_to_snapshot_empty_result_test() ->
+    eleveldb:destroy("get_ops_applicable_to_snapshot_empty_result_test", []),
+    {ok, AntidoteDB} = antidote_db:new("get_ops_applicable_to_snapshot_empty_result_test", leveldb),
+    {leveldb, DB} = AntidoteDB,
+
+    Key = key,
+
+    NotFound = get_ops_applicable_to_snapshot(DB, Key, vectorclock:from_list([{local, 3}, {remote, 2}])),
+    ?assertEqual({ok, not_found, []}, NotFound),
+
+    VC = vectorclock:from_list([{local, 4}, {remote, 4}]),
+    put_snapshot(DB, Key, #materialized_snapshot{snapshot_time = VC, value = 1}),
+    S1 = get_ops_applicable_to_snapshot(DB, Key, vectorclock:from_list([{local, 3}, {remote, 3}])),
+    ?assertEqual({ok, not_found, []}, S1),
+
+    antidote_db:close_and_destroy(AntidoteDB, "get_ops_applicable_to_snapshot_empty_result_test").
+
+get_ops_applicable_to_snapshot_non_empty_result_test() ->
+    eleveldb:destroy("get_ops_applicable_to_snapshot_non_empty_result_test", []),
+    {ok, AntidoteDB} = antidote_db:new("get_ops_applicable_to_snapshot_non_empty_result_test", leveldb),
+    {leveldb, DB} = AntidoteDB,
+
+    Key = key,
+    Key1 = key1,
+
+    VC = vectorclock:from_list([{local, 4}, {remote, 4}]),
+    put_snapshot(DB, Key, #materialized_snapshot{snapshot_time = VC, value = 1}),
+    VC1 = vectorclock:from_list([{local, 2}, {remote, 2}]),
+    put_snapshot(DB, Key, #materialized_snapshot{snapshot_time = VC1, value = 2}),
+    {ok, S1, Ops1} = get_ops_applicable_to_snapshot(DB, Key, vectorclock:from_list([{local, 5}, {remote, 6}])),
+    ?assertEqual(1, S1#materialized_snapshot.value),
+    ?assertEqual([], Ops1),
+
+    put_n_operations(DB, Key, 10),
+    put_n_operations(DB, Key1, 5),
+
+    {ok, S2, Ops2} = get_ops_applicable_to_snapshot(DB, Key, vectorclock:from_list([{local, 8}, {remote, 9}])),
+    ?assertEqual(1, S2#materialized_snapshot.value),
+    ?assertEqual([8, 7, 6, 5, 4], filter_records_into_numbers(Ops2)),
+
+    antidote_db:close_and_destroy(AntidoteDB, "get_ops_applicable_to_snapshot_non_empty_result_test").
 
 get_snapshot_not_found_test() ->
     eleveldb:destroy("get_snapshot_not_found_test", []),
