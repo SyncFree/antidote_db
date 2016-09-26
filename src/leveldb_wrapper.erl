@@ -70,7 +70,10 @@ put_snapshot(AntidoteDB, Key, Snapshot) ->
     SnapshotTimeList = vectorclock_to_sorted_list(Snapshot#materialized_snapshot.snapshot_time),
     put(AntidoteDB, {binary_to_atom(Key), SnapshotTimeList, snap}, Snapshot).
 
-%% Returns a list of operations that have commit time in the range [VCFrom, VCTo]
+%% Returns a list of operations that have commit time in the range [VCFrom, VCTo).
+%% In other words, it returns all ops which have a VectorClock concurrent or larger than VCFrom,
+%% and smaller or equal (for all entries) than VCTo.
+%% An example on what this method returns can be seen in the test get_operations_non_empty_test.
 -spec get_ops(eleveldb:db_ref(), key(), vectorclock(), vectorclock()) -> [#log_record{}].
 get_ops(DB, Key, VCFrom, VCTo) ->
     VCFromDict = vectorclock_to_dict(VCFrom),
@@ -83,7 +86,7 @@ get_ops(DB, Key, VCFrom, VCTo) ->
                 case Key == Key1 of %% check same key
                     true ->
                         %% if its greater, continue
-                        case vectorclock:gt(VC1Dict, VCToDict) of
+                        case vectorclock:strict_ge(VC1Dict, VCToDict) of
                             true ->
                                 AccIn;
                             false ->
@@ -275,8 +278,9 @@ get_operations_non_empty_test() ->
 
     %% concurrent operations are present in the result
     O1 = get_ops(DB, Key1, [{local, 2}, {remote, 2}], [{local, 8}, {remote, 9}]),
+    ?assertEqual([8, 7, 6, 5, 4, 3, 2], filter_records_into_numbers(O1)),
+
     O2 = get_ops(DB, Key1, [{local, 4}, {remote, 5}], [{local, 7}, {remote, 7}]),
-    ?assertEqual([9, 8, 7, 6, 5, 4, 3, 2], filter_records_into_numbers(O1)),
     ?assertEqual([7, 6, 5, 4], filter_records_into_numbers(O2)),
 
     antidote_db:close_and_destroy(AntidoteDB, "get_operations_non_empty_test").
@@ -302,7 +306,7 @@ operations_and_snapshots_mixed_test() ->
     ?assertEqual(5, Snapshot#materialized_snapshot.value),
 
     O1 = get_ops(DB, Key1, Snapshot#materialized_snapshot.snapshot_time, VCTo),
-    ?assertEqual([8, 7, 6, 5, 4, 3, 2], filter_records_into_numbers(O1)),
+    ?assertEqual([7, 6, 5, 4, 3, 2], filter_records_into_numbers(O1)),
 
     antidote_db:close_and_destroy(AntidoteDB, "operations_and_snapshots_mixed_test").
 
