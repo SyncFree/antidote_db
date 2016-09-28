@@ -28,10 +28,11 @@
     get_ops/4,
     put_op/4]).
 
+-record(ops_record, {ops_list :: list(), last_vc :: vectorclock()}).
+
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 -endif.
-
 
 %% Given a key and a VC, this method returns the most suitable snapshot committed before the VC
 %% with a list of operations in the range [SnapshotCommitTime, VC) to be applied to the mentioned
@@ -127,7 +128,6 @@ get_ops(DB, Key, VCFrom, VCTo) ->
             fun({K, V}, AccIn) ->
                 {Key1, VC1, OP} = binary_to_term(K),
                 VC1Dict = vectorclock:from_list(VC1),
-                io:format("~p : ~p ~n", [binary_to_term(K), binary_to_term(V)]),
                 case Key == Key1 of %% check same key
                     true ->
                         %% if its greater, continue
@@ -136,33 +136,45 @@ get_ops(DB, Key, VCFrom, VCTo) ->
                                 %% check its an op and its commit time is in the required range
                                 case vectorclock:lt(VC1Dict, VCFromDict) of
                                     true ->
-                                        AccIn;
+                                        %% Check if last two VCs are concurrent or we should break the fold
+                                        %% If it's concurrent, save the last vc for the next iteration
+                                        case concurrent_or_empty_vc(VC1Dict, AccIn#ops_record.last_vc) of
+                                            true ->
+                                                #ops_record{ops_list = AccIn#ops_record.ops_list, last_vc = VC1Dict};
+                                            false ->
+                                                throw({break, AccIn#ops_record.ops_list})
+                                        end;
                                     false ->
                                         case (OP == op) of
                                             true ->
-                                                [binary_to_term(V) | AccIn];
+                                                #ops_record{ops_list = [binary_to_term(V) | AccIn#ops_record.ops_list], last_vc = vectorclock:new()};
                                             false ->
                                                 AccIn
                                         end
                                 end;
                             false ->
-                                AccIn
+                                #ops_record{ops_list = AccIn#ops_record.ops_list, last_vc = vectorclock:new()}
                         end;
                     false ->
-                        throw({break, AccIn})
+                        throw({break, AccIn#ops_record.ops_list})
                 end
             end,
-            [],
+            #ops_record{ops_list = [], last_vc = vectorclock:new()},
             [{first_key, term_to_binary({Key})}]),
         %% If the fold returned without throwing a break (it iterated all
         %% keys and ended up normally) reverse the resulting list
-        lists:reverse(Res)
+        lists:reverse(Res#ops_record.ops_list)
     catch
         {break, OPS} ->
             lists:reverse(OPS);
         _ ->
             []
     end.
+
+%% Returns true if any of the DCs are empty or if the VCs are concurrent
+concurrent_or_empty_vc(VC1, VC2) ->
+    vectorclock:eq(VC1, vectorclock:new()) or vectorclock:eq(VC2, vectorclock:new())
+        or not (vectorclock:ge(VC1, VC2) or vectorclock:le(VC1, VC2)).
 
 %% Saves the operation into AntidoteDB
 -spec put_op(eleveldb:db_ref(), key(), vectorclock(), #log_record{}) -> ok | error.
@@ -429,6 +441,19 @@ length_of_vc_test() ->
         put_op(DB, Key, [{remote, 1}], #log_record{version = 4}),
         O4 = get_ops(DB, Key, [{local, 1}, {remote, 1}], [{local, 7}, {remote, 8}]),
         ?assertEqual([3, 2, 1, 4], filter_records_into_numbers(O4))
+                end).
+
+%% This test inserts 5 ops, 4 of them are concurrent, and checks that only the first and two of the concurrent are
+%% returned, since they are the only ones that match the requested ranged passed in
+concurrent_ops_test() ->
+    withFreshDb(fun(DB) ->
+        ok = put_op(DB, d, [{dc1, 10}, {dc2, 14}, {dc3, 3}], #log_record{version = 1}),
+        ok = put_op(DB, d, [{dc1, 9}, {dc2, 12}, {dc3, 1}], #log_record{version = 2}),
+        ok = put_op(DB, d, [{dc1, 7}, {dc2, 2}, {dc3, 12}], #log_record{version = 3}),
+        ok = put_op(DB, d, [{dc1, 5}, {dc2, 2}, {dc3, 10}], #log_record{version = 4}),
+        ok = put_op(DB, d, [{dc1, 1}, {dc2, 1}, {dc3, 1}], #log_record{version = 5}),
+        OPS = get_ops(DB, d, [{dc1, 10}, {dc2, 17}, {dc3, 2}], [{dc1, 12}, {dc2, 20}, {dc3, 18}]),
+        ?assertEqual([1, 3, 4], filter_records_into_numbers(OPS))
                 end).
 
 put_n_snapshots(_DB, _Key, 0) ->
