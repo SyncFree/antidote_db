@@ -64,7 +64,7 @@ get_ops_applicable_to_snapshot(DB, Key, VectorClock) ->
                 end
             end,
             [],
-            [{first_key, term_to_binary({Key})}]),
+            [{first_key, term_to_binary({Key, vectorclock_to_sorted_list(VectorClock)})}]),
         %% If the fold returned without throwing a break (it iterated all
         %% keys and ended up normally) reverse the resulting list
         {ok, not_found, lists:reverse(Res)}
@@ -100,7 +100,7 @@ get_snapshot(DB, Key, CommitTime) ->
                 end
             end,
             [],
-            [{first_key, term_to_binary({Key})}]),
+            [{first_key, term_to_binary({Key, vectorclock_to_sorted_list(CommitTime)})}]),
         {error, not_found}
     catch
         {break, SNAP} ->
@@ -160,7 +160,7 @@ get_ops(DB, Key, VCFrom, VCTo) ->
                 end
             end,
             #ops_record{ops_list = [], last_vc = vectorclock:new()},
-            [{first_key, term_to_binary({Key})}]),
+            [{first_key, term_to_binary({Key, vectorclock_to_sorted_list(VCTo)})}]),
         %% If the fold returned without throwing a break (it iterated all
         %% keys and ended up normally) reverse the resulting list
         lists:reverse(Res#ops_record.ops_list)
