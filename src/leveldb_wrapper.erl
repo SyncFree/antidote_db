@@ -22,58 +22,14 @@
 -include_lib("antidote_utils/include/antidote_utils.hrl").
 
 -export([
-    get_ops_applicable_to_snapshot/3,
     get_snapshot/3,
     put_snapshot/3,
     get_ops/4,
     put_op/4]).
 
--record(ops_record, {ops_list :: list(), last_vc :: vectorclock()}).
-
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 -endif.
-
-%% Given a key and a VC, this method returns the most suitable snapshot committed before the VC
-%% with a list of operations in the range [SnapshotCommitTime, VC) to be applied to the mentioned
-%% snapshot to generate a new one.
--spec get_ops_applicable_to_snapshot(eleveldb:db_ref(), key(), vectorclock()) ->
-    {ok, #materialized_snapshot{} | not_found, [#log_record{}]}.
-get_ops_applicable_to_snapshot(DB, Key, VectorClock) ->
-    try
-        Res = eleveldb:fold(DB,
-            fun({K, V}, AccIn) ->
-                {Key1, VC1, OP} = binary_to_term(K),
-                VC1Dict = vectorclock:from_list(VC1),
-                case Key == Key1 of %% check same key
-                    true ->
-                        %% if its greater, continue
-                        case vectorclock:le(VC1Dict, VectorClock) of
-                            true ->
-                                case (OP == op) of
-                                    true ->
-                                        [binary_to_term(V) | AccIn];
-                                    false ->
-                                        throw({break, binary_to_term(V), AccIn})
-                                end;
-                            false ->
-                                AccIn
-                        end;
-                    false ->
-                        throw({break, not_found, AccIn})
-                end
-            end,
-            [],
-            [{first_key, term_to_binary({Key, vectorclock_to_sorted_list(VectorClock)})}]),
-        %% If the fold returned without throwing a break (it iterated all
-        %% keys and ended up normally) reverse the resulting list
-        {ok, not_found, lists:reverse(Res)}
-    catch
-        {break, Snapshot, OPS} ->
-            {ok, Snapshot, lists:reverse(OPS)};
-        _ ->
-            {error, not_found}
-    end.
 
 %% Gets the most suitable snapshot for Key that has been committed
 %% before CommitTime. If its nothing is found, returns {error, not_found}
@@ -83,7 +39,7 @@ get_snapshot(DB, Key, CommitTime) ->
     try
         eleveldb:fold(DB,
             fun({K, V}, AccIn) ->
-                {Key1, VC, SNAP} = binary_to_term(K),
+                {Key1, VC, _HASH, SNAP} = binary_to_term(K),
                 case (Key1 == Key) of %% check same key
                     true ->
                         %% check its a snapshot and its time is less than the one required
@@ -100,7 +56,7 @@ get_snapshot(DB, Key, CommitTime) ->
                 end
             end,
             [],
-            [{first_key, term_to_binary({Key, vectorclock_to_sorted_list(CommitTime)})}]),
+            [{first_key, term_to_binary({Key})}]),
         {error, not_found}
     catch
         {break, SNAP} ->
@@ -113,7 +69,7 @@ get_snapshot(DB, Key, CommitTime) ->
 -spec put_snapshot(antidote_db:antidote_db(), key(), #materialized_snapshot{}) -> ok | error.
 put_snapshot(AntidoteDB, Key, Snapshot) ->
     SnapshotTimeList = vectorclock_to_sorted_list(Snapshot#materialized_snapshot.snapshot_time),
-    put(AntidoteDB, {binary_to_atom(Key), SnapshotTimeList, snap}, Snapshot).
+    put(AntidoteDB, {binary_to_atom(Key), SnapshotTimeList, erlang:phash2(SnapshotTimeList), snap}, Snapshot).
 
 %% Returns a list of operations that have commit time in the range [VCFrom, VCTo).
 %% In other words, it returns all ops which have a VectorClock concurrent or larger than VCFrom,
@@ -123,47 +79,45 @@ put_snapshot(AntidoteDB, Key, Snapshot) ->
 get_ops(DB, Key, VCFrom, VCTo) ->
     VCFromDict = vectorclock_to_dict(VCFrom),
     VCToDict = vectorclock_to_dict(VCTo),
+    MinTimeToSearch = get_min_time_in_VCs(VCFromDict, VCToDict),
     try
         Res = eleveldb:fold(DB,
             fun({K, V}, AccIn) ->
-                {Key1, VC1, OP} = binary_to_term(K),
+                {Key1, VC1, _HASH, OP} = binary_to_term(K),
                 VC1Dict = vectorclock:from_list(VC1),
+                io:format("~p : ~p ~n", [binary_to_term(K), binary_to_term(V)]),
                 case Key == Key1 of %% check same key
                     true ->
                         %% if its greater, continue
-                        case vectorclock:le(VC1Dict, VCToDict) of
+                        io:format("le or conc ~p    ~p ~n", [vectorclock:le(VC1Dict, VCToDict), concurrent_VCs(VC1Dict, VCToDict)]),
+                        case vectorclock:le(VC1Dict, VCToDict) or concurrent_VCs(VC1Dict, VCToDict) of
                             true ->
                                 %% check its an op and its commit time is in the required range
-                                case vectorclock:lt(VC1Dict, VCFromDict) of
+                                io:format("MIN ~p : ~p   RES: ~p ~n", [MinTimeToSearch, element(2, lists:nth(1, VC1)), MinTimeToSearch > element(2, lists:nth(1, VC1))]),
+                                case MinTimeToSearch > element(2, lists:nth(1, VC1)) of
                                     true ->
-                                        %% Check if last two VCs are concurrent or we should break the fold
-                                        %% If it's concurrent, save the last vc for the next iteration
-                                        case concurrent_or_empty_vc(VC1Dict, AccIn#ops_record.last_vc) of
-                                            true ->
-                                                #ops_record{ops_list = AccIn#ops_record.ops_list, last_vc = VC1Dict};
-                                            false ->
-                                                throw({break, AccIn#ops_record.ops_list})
-                                        end;
+                                        throw({break, AccIn});
                                     false ->
-                                        case (OP == op) of
+                                        io:format("Greater or conc ~p ~n", [greater_or_concurrent_VC(VCFromDict, VC1Dict)]),
+                                        case greater_or_concurrent_VC(VC1Dict, VCFromDict) and (OP == op) of
                                             true ->
-                                                #ops_record{ops_list = [binary_to_term(V) | AccIn#ops_record.ops_list], last_vc = vectorclock:new()};
+                                                [binary_to_term(V) | AccIn];
                                             false ->
                                                 AccIn
                                         end
                                 end;
                             false ->
-                                #ops_record{ops_list = AccIn#ops_record.ops_list, last_vc = vectorclock:new()}
+                                AccIn
                         end;
                     false ->
-                        throw({break, AccIn#ops_record.ops_list})
+                        throw({break, AccIn})
                 end
             end,
-            #ops_record{ops_list = [], last_vc = vectorclock:new()},
-            [{first_key, term_to_binary({Key, vectorclock_to_sorted_list(VCTo)})}]),
+            [],
+            [{first_key, term_to_binary({Key})}]),
         %% If the fold returned without throwing a break (it iterated all
         %% keys and ended up normally) reverse the resulting list
-        lists:reverse(Res#ops_record.ops_list)
+        lists:reverse(Res)
     catch
         {break, OPS} ->
             lists:reverse(OPS);
@@ -171,16 +125,26 @@ get_ops(DB, Key, VCFrom, VCTo) ->
             []
     end.
 
-%% Returns true if any of the DCs are empty or if the VCs are concurrent
-concurrent_or_empty_vc(VC1, VC2) ->
-    vectorclock:eq(VC1, vectorclock:new()) or vectorclock:eq(VC2, vectorclock:new())
-        or not (vectorclock:ge(VC1, VC2) or vectorclock:le(VC1, VC2)).
+get_min_time_in_VCs(VC1, VC2) ->
+    VC1List = vectorclock_to_sorted_list(VC1),
+    VC2List = vectorclock_to_sorted_list(VC2),
+    {_, MinTimeToSearch1} = lists:nth(length(VC1List), VC1List),
+    {_, MinTimeToSearch2} = lists:nth(length(VC2List), VC2List),
+    min(MinTimeToSearch1, MinTimeToSearch2).
+
+%% Returns true if VC1 is greater or concurrent with VC2
+greater_or_concurrent_VC(VC1, VC2) ->
+    vectorclock:ge(VC1, VC2) or concurrent_VCs(VC1, VC2).
+
+%% Returns true if VC1 is concurrent with VC2
+concurrent_VCs(VC1, VC2) ->
+    not (vectorclock:ge(VC1, VC2)) and not (vectorclock:le(VC1, VC2)).
 
 %% Saves the operation into AntidoteDB
 -spec put_op(eleveldb:db_ref(), key(), vectorclock(), #log_record{}) -> ok | error.
 put_op(DB, Key, VC, Record) ->
     VCList = vectorclock_to_sorted_list(VC),
-    put(DB, {binary_to_atom(Key), VCList, op}, Record).
+    put(DB, {binary_to_atom(Key), VCList, erlang:phash2(VCList), op}, Record).
 
 vectorclock_to_dict(VC) ->
     case is_list(VC) of
@@ -191,8 +155,8 @@ vectorclock_to_dict(VC) ->
 %% Sort the resulting list, for easier comparison and parsing
 vectorclock_to_sorted_list(VC) ->
     case is_list(VC) of
-        true -> lists:sort(VC);
-        false -> lists:sort(dict:to_list(VC))
+        true -> lists:sort(fun({_, ValA}, {_, ValB}) -> ValA > ValB end, VC);
+        false -> lists:sort(fun({_, ValA}, {_, ValB}) -> ValA > ValB end, dict:to_list(VC))
     end.
 
 %% Workaround for basho bench
@@ -233,73 +197,7 @@ withFreshDb(F) ->
 %% sorts VCs the correct way
 vectorclock_to_sorted_list_test() ->
     Sorted = vectorclock_to_sorted_list([{e, 5}, {c, 3}, {a, 1}, {b, 2}, {d, 4}]),
-    ?assertEqual([{a, 1}, {b, 2}, {c, 3}, {d, 4}, {e, 5}], Sorted).
-
-get_ops_applicable_to_snapshot_empty_result_test() ->
-    withFreshDb(fun(DB) ->
-        Key = key,
-
-        %% There are no ops nor snapshots in the DB
-        NotFound = get_ops_applicable_to_snapshot(DB, Key, vectorclock:from_list([{local, 3}, {remote, 2}])),
-        ?assertEqual({ok, not_found, []}, NotFound),
-
-        %% Add a new Snapshot, but it's not in the range searched, so the result is still empty
-        VC = vectorclock:from_list([{local, 4}, {remote, 4}]),
-        put_snapshot(DB, Key, #materialized_snapshot{snapshot_time = VC, value = 1}),
-
-        S1 = get_ops_applicable_to_snapshot(DB, Key, vectorclock:from_list([{local, 3}, {remote, 3}])),
-        ?assertEqual({ok, not_found, []}, S1)
-                end).
-
-get_ops_applicable_to_snapshot_non_empty_result_test() ->
-    withFreshDb(fun(DB) ->
-        Key = key,
-        Key1 = key1,
-
-        %% Save two snapshots
-        VC = vectorclock:from_list([{local, 4}, {remote, 4}]),
-        put_snapshot(DB, Key, #materialized_snapshot{snapshot_time = VC, value = 1}),
-        VC1 = vectorclock:from_list([{local, 2}, {remote, 2}]),
-        put_snapshot(DB, Key, #materialized_snapshot{snapshot_time = VC1, value = 2}),
-
-        %% There is one [4, 4] snapshot matches best so it's returned with no ops since there aren't any
-        {ok, S1, Ops1} = get_ops_applicable_to_snapshot(DB, Key, vectorclock:from_list([{local, 8}, {remote, 9}])),
-        ?assertEqual(1, S1#materialized_snapshot.value),
-        ?assertEqual([], Ops1),
-
-        %% Add some ops, and try again with the same VC. Now ops to be applied are returned
-        put_n_operations(DB, Key, 10),
-        put_n_operations(DB, Key1, 5),
-
-        {ok, S2, Ops2} = get_ops_applicable_to_snapshot(DB, Key, vectorclock:from_list([{local, 8}, {remote, 9}])),
-        ?assertEqual(1, S2#materialized_snapshot.value),
-        ?assertEqual([8, 7, 6, 5, 4], filter_records_into_numbers(Ops2))
-                end).
-
-get_snapshot_not_found_test() ->
-    withFreshDb(fun(DB) ->
-        Key = key,
-        Key1 = key1,
-        Key2 = key2,
-
-        %% No snapshot in the DB
-        NotFound = get_snapshot(DB, Key, vectorclock:from_list([{local, 0}, {remote, 0}])),
-        ?assertEqual({error, not_found}, NotFound),
-
-        %% Put 10 snapshots for Key and check there is no snapshot with time 0 in both DCs
-        put_n_snapshots(DB, Key, 10),
-        NotFound1 = get_snapshot(DB, Key, vectorclock:from_list([{local, 0}, {remote, 0}])),
-        ?assertEqual({error, not_found}, NotFound1),
-
-        %% Look for a snapshot for Key1
-        S1 = get_snapshot(DB, Key1, vectorclock:from_list([{local, 5}, {remote, 4}])),
-        ?assertEqual({error, not_found}, S1),
-
-        %% Put snapshots for Key2 and look for a snapshot for Key1
-        put_n_snapshots(DB, Key2, 10),
-        S2 = get_snapshot(DB, Key1, vectorclock:from_list([{local, 5}, {remote, 4}])),
-        ?assertEqual({error, not_found}, S2)
-                end).
+    ?assertEqual([{e, 5}, {d, 4}, {c, 3}, {b, 2}, {a, 1}], Sorted).
 
 get_snapshot_matching_vc_test() ->
     withFreshDb(fun(DB) ->
@@ -386,12 +284,11 @@ get_operations_non_empty_test() ->
         put_n_operations(DB, Key1, 10),
         put_n_operations(DB, Key2, 25),
 
-        %% Concurrent operations int the lower bound are present in the result
         O1 = get_ops(DB, Key1, [{local, 2}, {remote, 2}], [{local, 8}, {remote, 9}]),
-        ?assertEqual([8, 7, 6, 5, 4, 3, 2], filter_records_into_numbers(O1)),
+        ?assertEqual([2, 3, 4, 5, 6, 7, 8], filter_records_into_sorted_numbers(O1)),
 
         O2 = get_ops(DB, Key1, [{local, 4}, {remote, 5}], [{local, 7}, {remote, 7}]),
-        ?assertEqual([7, 6, 5, 4], filter_records_into_numbers(O2))
+        ?assertEqual([5, 6, 7], filter_records_into_sorted_numbers(O2))
                 end).
 
 operations_and_snapshots_mixed_test() ->
@@ -409,38 +306,11 @@ operations_and_snapshots_mixed_test() ->
         %% We want all ops for Key1 that are between the snapshot and
         %% [{local, 7}, {remote, 8}]. First get the snapshot, then OPS.
         {ok, Snapshot} = get_snapshot(DB, Key1, vectorclock:from_list(VCTo)),
-        ?assertEqual([{local, 2}, {remote, 3}], vectorclock_to_sorted_list(Snapshot#materialized_snapshot.snapshot_time)),
+        ?assertEqual([{remote, 3}, {local, 2}], vectorclock_to_sorted_list(Snapshot#materialized_snapshot.snapshot_time)),
         ?assertEqual(5, Snapshot#materialized_snapshot.value),
 
         O1 = get_ops(DB, Key1, Snapshot#materialized_snapshot.snapshot_time, VCTo),
-        ?assertEqual([7, 6, 5, 4, 3, 2], filter_records_into_numbers(O1))
-                end).
-
-%% This test is used to check that compare function for VCs is working OK
-%% with VCs containing != lengths and values
-length_of_vc_test() ->
-    withFreshDb(fun(DB) ->
-        %% Same key, and same value for the local DC
-        %% OP2 should be newer than op1 since it contains 1 more DC in its VC
-        Key = key,
-        put_op(DB, Key, [{local, 2}], #log_record{version = 1}),
-        put_op(DB, Key, [{local, 2}, {remote, 3}], #log_record{version = 2}),
-        O1 = filter_records_into_numbers(get_ops(DB, Key, [{local, 1}, {remote, 1}], [{local, 7}, {remote, 8}])),
-        ?assertEqual([2, 1], O1),
-
-        %% Insert OP3, with no remote DC value and check it´s newer than 1 and 2
-        put_op(DB, Key, [{local, 3}], #log_record{version = 3}),
-        O2 = get_ops(DB, Key, [{local, 1}, {remote, 1}], [{local, 7}, {remote, 8}]),
-        ?assertEqual([3, 2, 1], filter_records_into_numbers(O2)),
-
-        %% OP3 is not returned if the local value we look for is lower
-        O3 = get_ops(DB, Key, [{local, 1}, {remote, 1}], [{local, 2}, {remote, 8}]),
-        ?assertEqual([2, 1], filter_records_into_numbers(O3)),
-
-        %% Insert remote operation not containing local clock and check is the oldest one
-        put_op(DB, Key, [{remote, 1}], #log_record{version = 4}),
-        O4 = get_ops(DB, Key, [{local, 1}, {remote, 1}], [{local, 7}, {remote, 8}]),
-        ?assertEqual([3, 2, 1, 4], filter_records_into_numbers(O4))
+        ?assertEqual([3, 4, 5, 6, 7], filter_records_into_sorted_numbers(O1))
                 end).
 
 %% This test inserts 5 ops, 4 of them are concurrent, and checks that only the first and two of the concurrent are
@@ -452,9 +322,90 @@ concurrent_ops_test() ->
         ok = put_op(DB, d, [{dc1, 7}, {dc2, 2}, {dc3, 12}], #log_record{version = 3}),
         ok = put_op(DB, d, [{dc1, 5}, {dc2, 2}, {dc3, 10}], #log_record{version = 4}),
         ok = put_op(DB, d, [{dc1, 1}, {dc2, 1}, {dc3, 1}], #log_record{version = 5}),
+
         OPS = get_ops(DB, d, [{dc1, 10}, {dc2, 17}, {dc3, 2}], [{dc1, 12}, {dc2, 20}, {dc3, 18}]),
-        ?assertEqual([1, 3, 4], filter_records_into_numbers(OPS))
+
+        ?assertEqual([1, 3, 4], filter_records_into_sorted_numbers(OPS))
                 end).
+
+smallest_op_returned_test() ->
+    withFreshDb(fun(DB) ->
+        ok = put_op(DB, key, [{dc3, 1}], #log_record{version = 4}),
+        ok = put_op(DB, key, [{dc2, 4}, {dc3, 1}], #log_record{version = 3}),
+        ok = put_op(DB, key, [{dc2, 2}], #log_record{version = 2}),
+        ok = put_op(DB, key, [{dc2, 1}], #log_record{version = 1}),
+
+        OPS = get_ops(DB, key, [{dc2, 3}], [{dc2, 3}, {dc3, 1}]),
+
+        ?assertEqual([4], filter_records_into_sorted_numbers(OPS))
+                end).
+
+%% Checks that the dcs names don't matter for this way of ordering VCs
+%% The comparator yields the same result, but the HASH of the VC makes the difference
+insert_same_ops_for_sorting_test() ->
+    withFreshDb(fun(DB) ->
+        ok = put_op(DB, key, [{dc1, 3}], #log_record{version = 1}),
+        ok = put_op(DB, key, [{dc2, 3}], #log_record{version = 2}),
+        ok = put_op(DB, key, [{dc3, 3}], #log_record{version = 3}),
+
+        print_DB(DB),
+
+        OPS = get_ops(DB, key, [{dc0, 2}], [{dc6, 9}]),
+
+        ?assertEqual([1, 2, 3], filter_records_into_sorted_numbers(OPS))
+                end).
+
+pepe_test() ->
+    withFreshDb(fun(DB) ->
+        ok = put_op(DB, key, [{dc2, 3}], #log_record{version = 1}),
+        ok = put_op(DB, key, [{dc1, 5}, {dc2, 3}], #log_record{version = 2}),
+        ok = put_op(DB, key, [{dc1, 3}], #log_record{version = 3}),
+        ok = put_op(DB, key, [{dc1, 2}], #log_record{version = 4}),
+
+        Records = get_ops(DB, key, [{dc1, 3}], [{dc1, 5}, {dc2, 3}]),
+
+        ?assertEqual([1, 2, 3], filter_records_into_sorted_numbers(Records))
+                end).
+
+pepe1_test() ->
+    withFreshDb(fun(DB) ->
+        ok = put_op(DB, key, [{dc3, 1}], #log_record{version = 1}),
+        ok = put_op(DB, key, [{dc1, 7}, {dc3, 1}], #log_record{version = 2}),
+        ok = put_op(DB, key, [{dc1, 5}], #log_record{version = 3}),
+        ok = put_op(DB, key, [{dc1, 2}], #log_record{version = 4}),
+
+        Records = get_ops(DB, key, [{dc1, 5}], [{dc1, 7}, {dc3, 1}]),
+
+        ?assertEqual([1, 2, 3], filter_records_into_sorted_numbers(Records))
+                end).
+pepe2_test() ->
+    withFreshDb(fun(DB) ->
+
+        ok = put_op(DB, key, [{dc3, 3}], #log_record{version = 1}),
+        ok = put_op(DB, key, [{dc3, 1}], #log_record{version = 2}),
+        Records = get_ops(DB, key, [{dc3, 3}], [{dc3, 3}]),
+
+%%         VC1 = dict:from_list([{dc3, 2}]),
+%%        VC2 = dict:from_list([{dc1, 3}]),
+%%        io:format("COMP ~p ~p ~n", [vectorclock:ge(VC1, VC2), vectorclock:le(VC1, VC2)]),
+
+        ?assertEqual([1], filter_records_into_sorted_numbers(Records))
+                end).
+
+%%        VC1 = dict:from_list([{dc1, 1}, {dc2, 2}]),
+%%        VC2 = dict:from_list([{dc1, 2}, {dc2, 1}]),
+%%        io:format("COMP ~p ~p ~n", [vectorclock:ge(VC1, VC2), vectorclock:le(VC1, VC2)]),
+print_DB(Ref) ->
+    io:format("----------------------------~n"),
+    eleveldb:fold(
+        Ref,
+        fun({K, V}, AccIn) ->
+            io:format("~p : ~p ~n", [binary_to_term(K), binary_to_term(V)]),
+            AccIn
+        end,
+        [],
+        []),
+    io:format("----------------------------~n").
 
 put_n_snapshots(_DB, _Key, 0) ->
     ok;
@@ -472,7 +423,7 @@ put_n_operations(DB, Key, N) ->
         #log_record{version = N}),
     put_n_operations(DB, Key, N - 1).
 
-filter_records_into_numbers(List) ->
-    lists:foldr(fun(Record, Acum) -> [Record#log_record.version | Acum] end, [], List).
+filter_records_into_sorted_numbers(List) ->
+    lists:sort(lists:foldr(fun(Record, Acum) -> [Record#log_record.version | Acum] end, [], List)).
 
 -endif.
