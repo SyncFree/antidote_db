@@ -85,29 +85,20 @@ get_ops(DB, Key, VCFrom, VCTo) ->
             fun({K, V}, AccIn) ->
                 {Key1, VC1, _HASH, OP} = binary_to_term(K),
                 VC1Dict = vectorclock:from_list(VC1),
-                io:format("~p : ~p ~n", [binary_to_term(K), binary_to_term(V)]),
+%%                io:format("~p : ~p ~n", [binary_to_term(K), binary_to_term(V)]),
                 case Key == Key1 of %% check same key
                     true ->
-                        %% if its greater, continue
-                        io:format("le or conc ~p    ~p ~n", [vectorclock:le(VC1Dict, VCToDict), concurrent_VCs(VC1Dict, VCToDict)]),
-                        case vectorclock:le(VC1Dict, VCToDict) or concurrent_VCs(VC1Dict, VCToDict) of
+%%                        io:format("MIN ~p : ~p   RES: ~p ~n", [MinTimeToSearch, element(2, lists:nth(1, VC1)), MinTimeToSearch > element(2, lists:nth(1, VC1))]),
+                        case MinTimeToSearch =< element(2, lists:nth(1, VC1)) of
                             true ->
-                                %% check its an op and its commit time is in the required range
-                                io:format("MIN ~p : ~p   RES: ~p ~n", [MinTimeToSearch, element(2, lists:nth(1, VC1)), MinTimeToSearch > element(2, lists:nth(1, VC1))]),
-                                case MinTimeToSearch > element(2, lists:nth(1, VC1)) of
+                                case vc_in_range(VC1Dict, VCFromDict, VCToDict) and (OP == op) of
                                     true ->
-                                        throw({break, AccIn});
+                                        [binary_to_term(V) | AccIn];
                                     false ->
-                                        io:format("Greater or conc ~p ~n", [greater_or_concurrent_VC(VCFromDict, VC1Dict)]),
-                                        case greater_or_concurrent_VC(VC1Dict, VCFromDict) and (OP == op) of
-                                            true ->
-                                                [binary_to_term(V) | AccIn];
-                                            false ->
-                                                AccIn
-                                        end
+                                        AccIn
                                 end;
                             false ->
-                                AccIn
+                                throw({break, AccIn})
                         end;
                     false ->
                         throw({break, AccIn})
@@ -132,13 +123,9 @@ get_min_time_in_VCs(VC1, VC2) ->
     {_, MinTimeToSearch2} = lists:nth(length(VC2List), VC2List),
     min(MinTimeToSearch1, MinTimeToSearch2).
 
-%% Returns true if VC1 is greater or concurrent with VC2
-greater_or_concurrent_VC(VC1, VC2) ->
-    vectorclock:ge(VC1, VC2) or concurrent_VCs(VC1, VC2).
-
-%% Returns true if VC1 is concurrent with VC2
-concurrent_VCs(VC1, VC2) ->
-    not (vectorclock:ge(VC1, VC2)) and not (vectorclock:le(VC1, VC2)).
+%% Returns true if the VC is in the required range
+vc_in_range(VC, VCFrom, VCTo) ->
+    not vectorclock:lt(VC, VCFrom) and vectorclock:le(VC, VCTo).
 
 %% Saves the operation into AntidoteDB
 -spec put_op(eleveldb:db_ref(), key(), vectorclock(), #log_record{}) -> ok | error.
@@ -338,21 +325,6 @@ smallest_op_returned_test() ->
         OPS = get_ops(DB, key, [{dc2, 3}], [{dc2, 3}, {dc3, 1}]),
 
         ?assertEqual([4], filter_records_into_sorted_numbers(OPS))
-                end).
-
-%% Checks that the dcs names don't matter for this way of ordering VCs
-%% The comparator yields the same result, but the HASH of the VC makes the difference
-insert_same_ops_for_sorting_test() ->
-    withFreshDb(fun(DB) ->
-        ok = put_op(DB, key, [{dc1, 3}], #log_record{version = 1}),
-        ok = put_op(DB, key, [{dc2, 3}], #log_record{version = 2}),
-        ok = put_op(DB, key, [{dc3, 3}], #log_record{version = 3}),
-
-        print_DB(DB),
-
-        OPS = get_ops(DB, key, [{dc0, 2}], [{dc6, 9}]),
-
-        ?assertEqual([1, 2, 3], filter_records_into_sorted_numbers(OPS))
                 end).
 
 pepe_test() ->
