@@ -39,7 +39,7 @@ get_snapshot(DB, Key, CommitTime) ->
     try
         eleveldb:fold(DB,
             fun({K, V}, AccIn) ->
-                {Key1, VC, _HASH, SNAP} = binary_to_term(K),
+                {Key1, _MAX, _HASH, SNAP, VC} = binary_to_term(K),
                 case (Key1 == Key) of %% check same key
                     true ->
                         %% check its a snapshot and its time is less than the one required
@@ -67,9 +67,10 @@ get_snapshot(DB, Key, CommitTime) ->
 
 %% Saves the snapshot into AntidoteDB
 -spec put_snapshot(antidote_db:antidote_db(), key(), #materialized_snapshot{}) -> ok | error.
-put_snapshot(AntidoteDB, Key, Snapshot) ->
-    SnapshotTimeList = vectorclock_to_sorted_list(Snapshot#materialized_snapshot.snapshot_time),
-    put(AntidoteDB, {binary_to_atom(Key), SnapshotTimeList, erlang:phash2(SnapshotTimeList), snap}, Snapshot).
+put_snapshot(DB, Key, Snapshot) ->
+    VCDict = vectorclock_to_dict(Snapshot#materialized_snapshot.snapshot_time),
+    put(DB, {binary_to_atom(Key), get_max_time_in_VC(VCDict),
+        erlang:phash2(VCDict), snap, vectorclock_to_list(VCDict)}, Snapshot).
 
 %% Returns a list of operations that have commit time in the range [VCFrom, VCTo).
 %% In other words, it returns all ops which have a VectorClock concurrent or larger than VCFrom,
@@ -80,16 +81,17 @@ get_ops(DB, Key, VCFrom, VCTo) ->
     VCFromDict = vectorclock_to_dict(VCFrom),
     VCToDict = vectorclock_to_dict(VCTo),
     MinTimeToSearch = get_min_time_in_VCs(VCFromDict, VCToDict),
+    StartingTime = get_max_time_in_VC(VCToDict),
     try
         Res = eleveldb:fold(DB,
             fun({K, V}, AccIn) ->
-                {Key1, VC1, _HASH, OP} = binary_to_term(K),
+                {Key1, MAX, _HASH, OP, VC1} = binary_to_term(K),
                 VC1Dict = vectorclock:from_list(VC1),
 %%                io:format("~p : ~p ~n", [binary_to_term(K), binary_to_term(V)]),
                 case Key == Key1 of %% check same key
                     true ->
 %%                        io:format("MIN ~p : ~p   RES: ~p ~n", [MinTimeToSearch, element(2, lists:nth(1, VC1)), MinTimeToSearch > element(2, lists:nth(1, VC1))]),
-                        case MinTimeToSearch =< element(2, lists:nth(1, VC1)) of
+                        case MinTimeToSearch =< MAX of
                             true ->
                                 case vc_in_range(VC1Dict, VCFromDict, VCToDict) and (OP == op) of
                                     true ->
@@ -105,7 +107,7 @@ get_ops(DB, Key, VCFrom, VCTo) ->
                 end
             end,
             [],
-            [{first_key, term_to_binary({Key})}]),
+            [{first_key, term_to_binary({Key, StartingTime})}]),
         %% If the fold returned without throwing a break (it iterated all
         %% keys and ended up normally) reverse the resulting list
         lists:reverse(Res)
@@ -117,11 +119,29 @@ get_ops(DB, Key, VCFrom, VCTo) ->
     end.
 
 get_min_time_in_VCs(VC1, VC2) ->
-    VC1List = vectorclock_to_sorted_list(VC1),
-    VC2List = vectorclock_to_sorted_list(VC2),
-    {_, MinTimeToSearch1} = lists:nth(length(VC1List), VC1List),
-    {_, MinTimeToSearch2} = lists:nth(length(VC2List), VC2List),
-    min(MinTimeToSearch1, MinTimeToSearch2).
+    min(get_min_time_in_VC(VC1), get_min_time_in_VC(VC2)).
+
+get_min_time_in_VC(VC) ->
+    dict:fold(fun find_min_value/3, undefined, VC).
+
+get_max_time_in_VC(VC) ->
+    dict:fold(fun find_max_value/3, undefined, VC).
+
+find_min_value(_Key, Value, Acc) ->
+    case Acc of
+        undefined ->
+            Value;
+        _ ->
+            min(Value, Acc)
+    end.
+
+find_max_value(_Key, Value, Acc) ->
+    case Acc of
+        undefined ->
+            Value;
+        _ ->
+            max(Value, Acc)
+    end.
 
 %% Returns true if the VC is in the required range
 vc_in_range(VC, VCFrom, VCTo) ->
@@ -130,8 +150,9 @@ vc_in_range(VC, VCFrom, VCTo) ->
 %% Saves the operation into AntidoteDB
 -spec put_op(eleveldb:db_ref(), key(), vectorclock(), #log_record{}) -> ok | error.
 put_op(DB, Key, VC, Record) ->
-    VCList = vectorclock_to_sorted_list(VC),
-    put(DB, {binary_to_atom(Key), VCList, erlang:phash2(VCList), op}, Record).
+    VCDict = vectorclock_to_dict(VC),
+    put(DB, {binary_to_atom(Key), get_max_time_in_VC(VCDict),
+        erlang:phash2(VCDict), op, vectorclock_to_list(VC)}, Record).
 
 vectorclock_to_dict(VC) ->
     case is_list(VC) of
@@ -139,11 +160,10 @@ vectorclock_to_dict(VC) ->
         false -> VC
     end.
 
-%% Sort the resulting list, for easier comparison and parsing
-vectorclock_to_sorted_list(VC) ->
+vectorclock_to_list(VC) ->
     case is_list(VC) of
-        true -> lists:sort(fun({_, ValA}, {_, ValB}) -> ValA > ValB end, VC);
-        false -> lists:sort(fun({_, ValA}, {_, ValB}) -> ValA > ValB end, dict:to_list(VC))
+        true -> VC;
+        false -> dict:to_list(VC)
     end.
 
 %% Workaround for basho bench
@@ -179,12 +199,6 @@ withFreshDb(F) ->
     after
         antidote_db:close_and_destroy(AntidoteDB, "test_db")
     end.
-
-%% This test ensures vectorclock_to_list method
-%% sorts VCs the correct way
-vectorclock_to_sorted_list_test() ->
-    Sorted = vectorclock_to_sorted_list([{e, 5}, {c, 3}, {a, 1}, {b, 2}, {d, 4}]),
-    ?assertEqual([{e, 5}, {d, 4}, {c, 3}, {b, 2}, {a, 1}], Sorted).
 
 get_snapshot_matching_vc_test() ->
     withFreshDb(fun(DB) ->
@@ -293,7 +307,7 @@ operations_and_snapshots_mixed_test() ->
         %% We want all ops for Key1 that are between the snapshot and
         %% [{local, 7}, {remote, 8}]. First get the snapshot, then OPS.
         {ok, Snapshot} = get_snapshot(DB, Key1, vectorclock:from_list(VCTo)),
-        ?assertEqual([{remote, 3}, {local, 2}], vectorclock_to_sorted_list(Snapshot#materialized_snapshot.snapshot_time)),
+        ?assertEqual([{local, 2}, {remote, 3}], vectorclock_to_sorted_list(Snapshot#materialized_snapshot.snapshot_time)),
         ?assertEqual(5, Snapshot#materialized_snapshot.value),
 
         O1 = get_ops(DB, Key1, Snapshot#materialized_snapshot.snapshot_time, VCTo),
@@ -367,6 +381,16 @@ pepe2_test() ->
 %%        VC1 = dict:from_list([{dc1, 1}, {dc2, 2}]),
 %%        VC2 = dict:from_list([{dc1, 2}, {dc2, 1}]),
 %%        io:format("COMP ~p ~p ~n", [vectorclock:ge(VC1, VC2), vectorclock:le(VC1, VC2)]),
+
+pepe3_test() ->
+    withFreshDb(fun(DB) ->
+        ok = put_op(DB, key, [{dc3, 3}], #log_record{version = 2}),
+        ok = put_op(DB, key, [{dc3, 5}], #log_record{version = 3}),
+        ok = put_op(DB, key, [{dc1, 1}], #log_record{version = 1}),
+        Records = get_ops(DB, key, [{dc3, 3}], [{dc3, 5}]),
+        ?assertEqual([2, 3], filter_records_into_sorted_numbers(Records))
+                end).
+
 print_DB(Ref) ->
     io:format("----------------------------~n"),
     eleveldb:fold(
@@ -397,5 +421,11 @@ put_n_operations(DB, Key, N) ->
 
 filter_records_into_sorted_numbers(List) ->
     lists:sort(lists:foldr(fun(Record, Acum) -> [Record#log_record.version | Acum] end, [], List)).
+
+vectorclock_to_sorted_list(VC) ->
+    case is_list(VC) of
+        true -> lists:sort(VC);
+        false -> lists:sort(dict:to_list(VC))
+    end.
 
 -endif.
