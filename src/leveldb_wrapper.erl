@@ -32,7 +32,7 @@
 -endif.
 
 %% Gets the most suitable snapshot for Key that has been committed
-%% before CommitTime. If its nothing is found, returns {error, not_found}
+%% before CommitTime. If no snapshot is found, returns {error, not_found}
 -spec get_snapshot(eleveldb:db_ref(), key(), snapshot_time()) ->
     {ok, #materialized_snapshot{}} | {error, not_found}.
 get_snapshot(DB, Key, CommitTime) ->
@@ -65,7 +65,7 @@ get_snapshot(DB, Key, CommitTime) ->
             {error, not_found}
     end.
 
-%% Saves the snapshot into AntidoteDB
+%% Saves the snapshot into the DB
 -spec put_snapshot(antidote_db:antidote_db(), key(), #materialized_snapshot{}) -> ok | error.
 put_snapshot(DB, Key, Snapshot) ->
     VCDict = vectorclock_to_dict(Snapshot#materialized_snapshot.snapshot_time),
@@ -75,45 +75,47 @@ put_snapshot(DB, Key, Snapshot) ->
 %% Returns a list of operations that have commit time in the range [VCFrom, VCTo).
 %% In other words, it returns all ops which have a VectorClock concurrent or larger than VCFrom,
 %% and smaller or equal (for all entries) than VCTo.
-%% An example on what this method returns can be seen in the test get_operations_non_empty_test.
+%% Examples of what this method returns, can be seen in the tests.
 -spec get_ops(eleveldb:db_ref(), key(), vectorclock(), vectorclock()) -> [#log_record{}].
 get_ops(DB, Key, VCFrom, VCTo) ->
+    %% Convert the VCs passed in to Dicts (if necessary)
     VCFromDict = vectorclock_to_dict(VCFrom),
     VCToDict = vectorclock_to_dict(VCTo),
+
+    %% Calculate the min time in the VCs that compose the search range
     MinTimeToSearch = get_min_time_in_VCs(VCFromDict, VCToDict),
+
+    %% Get the max time in the lower upper bound so the fold starts from keys that have that max value
     StartingTime = get_max_time_in_VC(VCToDict),
     try
-        Res = eleveldb:fold(DB,
+        eleveldb:fold(DB,
             fun({K, V}, AccIn) ->
                 {Key1, MAX, _HASH, OP, VC1} = binary_to_term(K),
                 VC1Dict = vectorclock:from_list(VC1),
-%%                io:format("~p : ~p ~n", [binary_to_term(K), binary_to_term(V)]),
-                case Key == Key1 of %% check same key
+                case Key == Key1 of
                     true ->
-%%                        io:format("MIN ~p : ~p   RES: ~p ~n", [MinTimeToSearch, element(2, lists:nth(1, VC1)), MinTimeToSearch > element(2, lists:nth(1, VC1))]),
+                        %% Check that the MinTimeToSearch is smaller than the MAX value of VC1
                         case MinTimeToSearch =< MAX of
                             true ->
+                                %% Check VC in range and the DB entry corresponds to an OP
                                 case vc_in_range(VC1Dict, VCFromDict, VCToDict) and (OP == op) of
                                     true ->
                                         [binary_to_term(V) | AccIn];
                                     false ->
                                         AccIn
                                 end;
-                            false ->
+                            false -> %% All entries of VC1 are smaller than the MinTime to search
                                 throw({break, AccIn})
                         end;
-                    false ->
+                    false -> %% Not the same key we are looking for
                         throw({break, AccIn})
                 end
             end,
             [],
-            [{first_key, term_to_binary({Key, StartingTime})}]),
-        %% If the fold returned without throwing a break (it iterated all
-        %% keys and ended up normally) reverse the resulting list
-        lists:reverse(Res)
+            [{first_key, term_to_binary({Key, StartingTime})}])
     catch
         {break, OPS} ->
-            lists:reverse(OPS);
+            OPS;
         _ ->
             []
     end.
@@ -147,7 +149,7 @@ find_max_value(_Key, Value, Acc) ->
 vc_in_range(VC, VCFrom, VCTo) ->
     not vectorclock:lt(VC, VCFrom) and vectorclock:le(VC, VCTo).
 
-%% Saves the operation into AntidoteDB
+%% Saves the operation into the DB
 -spec put_op(eleveldb:db_ref(), key(), vectorclock(), #log_record{}) -> ok | error.
 put_op(DB, Key, VC, Record) ->
     VCDict = vectorclock_to_dict(VC),
@@ -174,7 +176,7 @@ binary_to_atom(Key) ->
         false -> Key
     end.
 
-%% @doc puts the Value associated to Key in eleveldb AntidoteDB
+%% @doc puts the Value associated to Key in eleveldb
 -spec put(eleveldb:db_ref(), any(), any()) -> ok | {error, any()}.
 put(DB, Key, Value) ->
     AKey = case is_binary(Key) of
@@ -192,12 +194,12 @@ put(DB, Key, Value) ->
 withFreshDb(F) ->
     %% Destroy the test DB to prevent having dirty DBs if a test fails
     eleveldb:destroy("test_db", []),
-    {ok, AntidoteDB} = antidote_db:new("test_db", leveldb),
-    {leveldb, Db} = AntidoteDB,
+    {ok, DB} = eleveldb:open("test_db", [{create_if_missing, true}, {antidote, true}]),
     try
-        F(Db)
+        F(DB)
     after
-        antidote_db:close_and_destroy(AntidoteDB, "test_db")
+        eleveldb:close(DB),
+        eleveldb:destroy("test_db", [])
     end.
 
 get_snapshot_matching_vc_test() ->
@@ -341,67 +343,16 @@ smallest_op_returned_test() ->
         ?assertEqual([4], filter_records_into_sorted_numbers(OPS))
                 end).
 
-pepe_test() ->
-    withFreshDb(fun(DB) ->
-        ok = put_op(DB, key, [{dc2, 3}], #log_record{version = 1}),
-        ok = put_op(DB, key, [{dc1, 5}, {dc2, 3}], #log_record{version = 2}),
-        ok = put_op(DB, key, [{dc1, 3}], #log_record{version = 3}),
-        ok = put_op(DB, key, [{dc1, 2}], #log_record{version = 4}),
-
-        Records = get_ops(DB, key, [{dc1, 3}], [{dc1, 5}, {dc2, 3}]),
-
-        ?assertEqual([1, 2, 3], filter_records_into_sorted_numbers(Records))
-                end).
-
-pepe1_test() ->
-    withFreshDb(fun(DB) ->
-        ok = put_op(DB, key, [{dc3, 1}], #log_record{version = 1}),
-        ok = put_op(DB, key, [{dc1, 7}, {dc3, 1}], #log_record{version = 2}),
-        ok = put_op(DB, key, [{dc1, 5}], #log_record{version = 3}),
-        ok = put_op(DB, key, [{dc1, 2}], #log_record{version = 4}),
-
-        Records = get_ops(DB, key, [{dc1, 5}], [{dc1, 7}, {dc3, 1}]),
-
-        ?assertEqual([1, 2, 3], filter_records_into_sorted_numbers(Records))
-                end).
-pepe2_test() ->
-    withFreshDb(fun(DB) ->
-
-        ok = put_op(DB, key, [{dc3, 3}], #log_record{version = 1}),
-        ok = put_op(DB, key, [{dc3, 1}], #log_record{version = 2}),
-        Records = get_ops(DB, key, [{dc3, 3}], [{dc3, 3}]),
-
-%%         VC1 = dict:from_list([{dc3, 2}]),
-%%        VC2 = dict:from_list([{dc1, 3}]),
-%%        io:format("COMP ~p ~p ~n", [vectorclock:ge(VC1, VC2), vectorclock:le(VC1, VC2)]),
-
-        ?assertEqual([1], filter_records_into_sorted_numbers(Records))
-                end).
-
-%%        VC1 = dict:from_list([{dc1, 1}, {dc2, 2}]),
-%%        VC2 = dict:from_list([{dc1, 2}, {dc2, 1}]),
-%%        io:format("COMP ~p ~p ~n", [vectorclock:ge(VC1, VC2), vectorclock:le(VC1, VC2)]),
-
-pepe3_test() ->
+failing_test_in_proper_test() ->
     withFreshDb(fun(DB) ->
         ok = put_op(DB, key, [{dc3, 3}], #log_record{version = 2}),
         ok = put_op(DB, key, [{dc3, 5}], #log_record{version = 3}),
         ok = put_op(DB, key, [{dc1, 1}], #log_record{version = 1}),
-        Records = get_ops(DB, key, [{dc3, 3}], [{dc3, 5}]),
-        ?assertEqual([2, 3], filter_records_into_sorted_numbers(Records))
-                end).
 
-print_DB(Ref) ->
-    io:format("----------------------------~n"),
-    eleveldb:fold(
-        Ref,
-        fun({K, V}, AccIn) ->
-            io:format("~p : ~p ~n", [binary_to_term(K), binary_to_term(V)]),
-            AccIn
-        end,
-        [],
-        []),
-    io:format("----------------------------~n").
+        OPS = get_ops(DB, key, [{dc3, 3}], [{dc3, 5}]),
+
+        ?assertEqual([2, 3], filter_records_into_sorted_numbers(OPS))
+                end).
 
 put_n_snapshots(_DB, _Key, 0) ->
     ok;
