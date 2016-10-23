@@ -345,13 +345,15 @@ smallest_op_returned_test() ->
 
 failing_test_in_proper_test() ->
     withFreshDb(fun(DB) ->
-        ok = put_op(DB, key, [{dc3, 3}], #log_record{version = 2}),
-        ok = put_op(DB, key, [{dc3, 5}], #log_record{version = 3}),
-        ok = put_op(DB, key, [{dc1, 1}], #log_record{version = 1}),
+        ok = put_op(DB, key, [{dc3, 2}], #log_record{version = 4}),
+        ok = put_op(DB, key, [{dc2, 2}], #log_record{version = 3}),
+        ok = put_op(DB, key, [{dc1, 3}, {dc2, 5}], #log_record{version = 2}),
+        ok = put_op(DB, key, [{dc1, 3}], #log_record{version = 1}),
 
-        OPS = get_ops(DB, key, [{dc3, 3}], [{dc3, 5}]),
+        OPS = get_ops(DB, key, [{dc1, 3}], [{dc1, 3}, {dc2, 5}]),
 
-        ?assertEqual([2, 3], filter_records_into_sorted_numbers(OPS))
+        ?assertEqual([1, 2], filter_records_into_sorted_numbers(OPS))
+        % Proper says it should be [1, 2, 3]
                 end).
 
 put_n_snapshots(_DB, _Key, 0) ->
