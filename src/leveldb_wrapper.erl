@@ -120,8 +120,20 @@ get_ops(DB, Key, VCFrom, VCTo) ->
             []
     end.
 
+%% If VCs have the same keys, returns the min time found,
+%% otherwise returns 0.
 get_min_time_in_VCs(VC1, VC2) ->
-    min(get_min_time_in_VC(VC1), get_min_time_in_VC(VC2)).
+    case same_keys_in_vcs(VC1, VC2) of
+        true ->
+            min(get_min_time_in_VC(VC1), get_min_time_in_VC(VC2));
+        false ->
+            0
+    end.
+
+%% Checks that the 2 VCs passed in, have the same keys
+same_keys_in_vcs(VC1, VC2) ->
+    dict:fetch_keys(VC1) == dict:fetch_keys(VC2).
+
 
 get_min_time_in_VC(VC) ->
     dict:fold(fun find_min_value/3, undefined, VC).
@@ -343,7 +355,9 @@ smallest_op_returned_test() ->
         ?assertEqual([4], filter_records_into_sorted_numbers(OPS))
                 end).
 
-failing_test_in_proper_test() ->
+%% This test ensures that the break condition doesn't stop in the min value of DCS
+%% if the VCs in the search range, have different keyset.
+concurrent_op_lower_than_search_range_test() ->
     withFreshDb(fun(DB) ->
         ok = put_op(DB, key, [{dc3, 2}], #log_record{version = 4}),
         ok = put_op(DB, key, [{dc2, 2}], #log_record{version = 3}),
@@ -352,8 +366,7 @@ failing_test_in_proper_test() ->
 
         OPS = get_ops(DB, key, [{dc1, 3}], [{dc1, 3}, {dc2, 5}]),
 
-        ?assertEqual([1, 2], filter_records_into_sorted_numbers(OPS))
-        % Proper says it should be [1, 2, 3]
+        ?assertEqual([1, 2, 3], filter_records_into_sorted_numbers(OPS))
                 end).
 
 put_n_snapshots(_DB, _Key, 0) ->

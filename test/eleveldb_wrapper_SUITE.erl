@@ -31,10 +31,11 @@
     operations_and_snapshots_mixed/1,
     concurrent_ops/1,
     smallest_op_returned/1,
-    failing_test_in_proper/1]).
+    concurrent_op_lower_than_search_range/1]).
 
 all() -> [get_snapshot_matching_vc, get_snapshot_not_matching_vc, get_operations_empty_result,
-    get_operations_non_empty, operations_and_snapshots_mixed, concurrent_ops, smallest_op_returned, failing_test_in_proper].
+    get_operations_non_empty, operations_and_snapshots_mixed, concurrent_ops, smallest_op_returned,
+    concurrent_op_lower_than_search_range].
 
 withFreshDb(F) ->
     %% Destroy the test DB to prevent having dirty DBs if a test fails
@@ -188,15 +189,18 @@ smallest_op_returned(_Config) ->
         ?assertEqual([4], filter_records_into_sorted_numbers(OPS))
                 end).
 
-failing_test_in_proper(_Config) ->
+%% This test ensures that the break condition doesn't stop in the min value of DCS
+%% if the VCs in the search range, have different keyset.
+concurrent_op_lower_than_search_range(_Config) ->
     withFreshDb(fun(DB) ->
-        ok = leveldb_wrapper:put_op(DB, key, [{dc3, 3}], #log_record{version = 2}),
-        ok = leveldb_wrapper:put_op(DB, key, [{dc3, 5}], #log_record{version = 3}),
-        ok = leveldb_wrapper:put_op(DB, key, [{dc1, 1}], #log_record{version = 1}),
+        ok = leveldb_wrapper:put_op(DB, key, [{dc3, 2}], #log_record{version = 4}),
+        ok = leveldb_wrapper:put_op(DB, key, [{dc2, 2}], #log_record{version = 3}),
+        ok = leveldb_wrapper:put_op(DB, key, [{dc1, 3}, {dc2, 5}], #log_record{version = 2}),
+        ok = leveldb_wrapper:put_op(DB, key, [{dc1, 3}], #log_record{version = 1}),
 
-        OPS = leveldb_wrapper:get_ops(DB, key, [{dc3, 3}], [{dc3, 5}]),
+        OPS = leveldb_wrapper:get_ops(DB, key, [{dc1, 3}], [{dc1, 3}, {dc2, 5}]),
 
-        ?assertEqual([2, 3], filter_records_into_sorted_numbers(OPS))
+        ?assertEqual([1, 2, 3], filter_records_into_sorted_numbers(OPS))
                 end).
 
 put_n_snapshots(_DB, _Key, 0) ->
