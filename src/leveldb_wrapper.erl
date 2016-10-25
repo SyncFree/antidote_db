@@ -32,15 +32,16 @@
 -spec get_snapshot(eleveldb:db_ref(), key(), snapshot_time()) ->
     {ok, #materialized_snapshot{}} | {error, not_found}.
 get_snapshot(DB, Key, CommitTime) ->
+    StartingTime = get_max_time_in_VC(CommitTime),
     try
         eleveldb:fold(DB,
             fun({K, V}, AccIn) ->
                 {Key1, _MAX, _HASH, SNAP, VC} = binary_to_term(K),
                 case (Key1 == Key) of %% check same key
                     true ->
-                        %% check its a snapshot and its time is less than the one required
+                        %% check it's a snapshot and has time less than the one required
                         case (SNAP == snap) and
-                            vectorclock:le(vectorclock:from_list(VC), CommitTime) of
+                            not vectorclock:gt(vectorclock:from_list(VC), CommitTime) of
                             true ->
                                 Snapshot = binary_to_term(V),
                                 throw({break, Snapshot});
@@ -52,7 +53,7 @@ get_snapshot(DB, Key, CommitTime) ->
                 end
             end,
             [],
-            [{first_key, term_to_binary({Key})}]),
+            [{first_key, term_to_binary({Key, StartingTime})}]),
         {error, not_found}
     catch
         {break, SNAP} ->
