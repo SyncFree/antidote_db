@@ -26,7 +26,6 @@
     new/2,
     close_and_destroy/2,
     close/1,
-    get_ops_applicable_to_snapshot/3,
     get_snapshot/3,
     put_snapshot/3,
     get_ops/4,
@@ -67,16 +66,6 @@ close({Type, DB}) ->
     case Type of
         leveldb ->
             eleveldb:close(DB);
-        _ ->
-            {error, type_not_supported}
-    end.
-
--spec get_ops_applicable_to_snapshot(antidote_db:antidote_db(), key(), vectorclock()) ->
-    {ok, #materialized_snapshot{} | not_found, [#log_record{}]}.
-get_ops_applicable_to_snapshot({Type, DB}, Key, VectorClock) ->
-    case Type of
-        leveldb ->
-            leveldb_wrapper:get_ops_applicable_to_snapshot(DB, Key, VectorClock);
         _ ->
             {error, type_not_supported}
     end.
