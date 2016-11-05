@@ -73,7 +73,7 @@ put_snapshot(DB, Key, Snapshot) ->
 %% In other words, it returns all ops which have a VectorClock concurrent or larger than VCFrom,
 %% and smaller or equal (for all entries) than VCTo.
 %% Examples of what this method returns, can be seen in the tests.
--spec get_ops(eleveldb:db_ref(), key(), vectorclock(), vectorclock()) -> [#log_record{}].
+-spec get_ops(eleveldb:db_ref(), key(), vectorclock(), vectorclock()) -> [any()].
 get_ops(DB, Key, VCFrom, VCTo) ->
     %% Convert the VCs passed in to Dicts (if necessary)
     VCFromDict = vectorclock_to_dict(VCFrom),
@@ -159,7 +159,7 @@ vc_in_range(VC, VCFrom, VCTo) ->
     not vectorclock:lt(VC, VCFrom) and vectorclock:le(VC, VCTo).
 
 %% Saves the operation into the DB
--spec put_op(eleveldb:db_ref(), key(), vectorclock(), #log_record{}) -> ok | error.
+-spec put_op(eleveldb:db_ref(), key(), vectorclock(), any()) -> ok | error.
 put_op(DB, Key, VC, Record) ->
     VCDict = vectorclock_to_dict(VC),
     put(DB, {binary_to_atom(Key), get_max_time_in_VC(VCDict),

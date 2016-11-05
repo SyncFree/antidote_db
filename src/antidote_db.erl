@@ -93,7 +93,7 @@ put_snapshot({Type, DB}, Key, Snapshot) ->
     end.
 
 %% Returns a list of operations that have commit time in the range [VCFrom, VCTo]
--spec get_ops(antidote_db:antidote_db(), key(), vectorclock(), vectorclock()) -> [#log_record{}].
+-spec get_ops(antidote_db:antidote_db(), key(), vectorclock(), vectorclock()) -> [any()].
 get_ops({Type, DB}, Key, VCFrom, VCTo) ->
     case Type of
         leveldb ->
@@ -104,7 +104,7 @@ get_ops({Type, DB}, Key, VCFrom, VCTo) ->
 
 
 %% Saves the operation into AntidoteDB
--spec put_op(antidote_db:antidote_db(), key(), vectorclock(), #log_record{}) -> ok | error.
+-spec put_op(antidote_db:antidote_db(), key(), vectorclock(), any()) -> ok | error.
 put_op({Type, DB}, Key, VC, Record) ->
     case Type of
         leveldb ->
