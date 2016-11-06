@@ -27,6 +27,10 @@
     get_ops/4,
     put_op/4]).
 
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+-endif.
+
 %% Gets the most suitable snapshot for Key that has been committed
 %% before CommitTime. If no snapshot is found, returns {error, not_found}
 -spec get_snapshot(eleveldb:db_ref(), key(), snapshot_time()) ->
@@ -131,20 +135,19 @@ get_min_time_in_VCs(VC1, VC2) ->
 same_keys_in_vcs(VC1, VC2) ->
     dict:fetch_keys(VC1) == dict:fetch_keys(VC2).
 
-
 get_min_time_in_VC(VC) ->
-    dict:fold(fun find_min_value/3, undefined, VC).
+    case dict:fold(fun find_min_value/3, undefined, VC) of
+        undefined ->
+            0;
+        Val ->
+            Val
+    end.
 
 get_max_time_in_VC(VC) ->
-    dict:fold(fun find_max_value/3, undefined, VC).
+    dict:fold(fun find_max_value/3, 0, VC).
 
 find_min_value(_Key, Value, Acc) ->
-    case Acc of
-        undefined ->
-            Value;
-        _ ->
-            min(Value, Acc)
-    end.
+    min(Value, Acc).
 
 find_max_value(_Key, Value, Acc) ->
     case Acc of
@@ -197,3 +200,17 @@ put(DB, Key, Value) ->
                 false -> term_to_binary(Value)
             end,
     eleveldb:put(DB, AKey, ATerm, []).
+
+-ifdef(TEST).
+
+empty_vc_max_min_test() ->
+    VC = vectorclock:new(),
+    ?assertEqual(0, get_max_time_in_VC(VC)),
+    ?assertEqual(0, get_min_time_in_VC(VC)).
+
+non_empty_vc_max_min_test() ->
+    VC = vectorclock:from_list([{dc1, 10}, {dc2, 14}, {dc3, 3}]),
+    ?assertEqual(14, get_max_time_in_VC(VC)),
+    ?assertEqual(3, get_min_time_in_VC(VC)).
+
+-endif.
