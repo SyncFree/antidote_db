@@ -134,7 +134,7 @@ get_operations_non_empty(_Config) ->
         put_n_operations(DB, Key2, 25),
 
         O1 = leveldb_wrapper:get_ops(DB, Key1, [{local, 2}, {remote, 2}], [{local, 8}, {remote, 9}]),
-        ?assertEqual([2, 3, 4, 5, 6, 7, 8], filter_records_into_sorted_numbers(O1)),
+        ?assertEqual([3, 4, 5, 6, 7, 8], filter_records_into_sorted_numbers(O1)),
 
         O2 = leveldb_wrapper:get_ops(DB, Key1, [{local, 4}, {remote, 5}], [{local, 7}, {remote, 7}]),
         ?assertEqual([5, 6, 7], filter_records_into_sorted_numbers(O2))
@@ -200,7 +200,7 @@ concurrent_op_lower_than_search_range(_Config) ->
 
         OPS = leveldb_wrapper:get_ops(DB, key, [{dc1, 3}], [{dc1, 3}, {dc2, 5}]),
 
-        ?assertEqual([1, 2, 3], filter_records_into_sorted_numbers(OPS))
+        ?assertEqual([2, 3], filter_records_into_sorted_numbers(OPS))
                 end).
 
 put_n_snapshots(_DB, _Key, 0) ->

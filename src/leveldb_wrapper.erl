@@ -45,7 +45,7 @@ get_snapshot(DB, Key, CommitTime) ->
                     true ->
                         %% check it's a snapshot and has time less than the one required
                         case (SNAP == snap) and
-                            not vectorclock:gt(vectorclock:from_list(VC), CommitTime) of
+                            vectorclock:le(vectorclock:from_list(VC), CommitTime) of
                             true ->
                                 Snapshot = binary_to_term(V),
                                 throw({break, Snapshot});
@@ -73,9 +73,12 @@ put_snapshot(DB, Key, Snapshot) ->
     put(DB, {binary_to_atom(Key), get_max_time_in_VC(VCDict),
         erlang:phash2(VCDict), snap, vectorclock_to_list(VCDict)}, Snapshot).
 
-%% Returns a list of operations that have commit time in the range [VCFrom, VCTo).
-%% In other words, it returns all ops which have a VectorClock concurrent or larger than VCFrom,
-%% and smaller or equal (for all entries) than VCTo.
+%% Returns a list of operations that have commit time in the range (VCFrom, VCTo].
+%% In other words, it returns all ops which have a VectorClock concurrent or larger
+%% (but not equal) than VCFrom, and smaller or equal (for all entries) than VCTo.
+%% This method is intended to be used to get the operations to be applied to a snapshot.
+%% Taking this into account, we expect VCFrom to be the VC of a snapshot, and VCTo
+%% to be the VC of the max time we want to read.
 %% Examples of what this method returns, can be seen in the tests.
 -spec get_ops(eleveldb:db_ref(), key(), vectorclock(), vectorclock()) -> [any()].
 get_ops(DB, Key, VCFrom, VCTo) ->
@@ -159,7 +162,10 @@ find_max_value(_Key, Value, Acc) ->
 
 %% Returns true if the VC is in the required range
 vc_in_range(VC, VCFrom, VCTo) ->
-    not vectorclock:lt(VC, VCFrom) and vectorclock:le(VC, VCTo).
+    %% Check range VCs are different
+    not vectorclock:eq(VCFrom, VCTo) and
+    %% If they are different, check that VC is in the range
+    not vectorclock:le(VC, VCFrom) and vectorclock:le(VC, VCTo).
 
 %% Saves the operation into the DB
 -spec put_op(eleveldb:db_ref(), key(), vectorclock(), any()) -> ok | error.
@@ -212,5 +218,20 @@ non_empty_vc_max_min_test() ->
     VC = vectorclock:from_list([{dc1, 10}, {dc2, 14}, {dc3, 3}]),
     ?assertEqual(14, get_max_time_in_VC(VC)),
     ?assertEqual(3, get_min_time_in_VC(VC)).
+
+vc_in_range_same_range_test() ->
+    VC = vectorclock:from_list([{dc1, 10}, {dc2, 14}]),
+    ?assertEqual(false, vc_in_range(VC, VC, VC)).
+
+vc_in_range_different_range_test() ->
+    VC = vectorclock:from_list([{dc1, 10}, {dc2, 14}]),
+    VC1 = vectorclock:from_list([{dc1, 10}, {dc2, 13}]),
+    VC2 = vectorclock:from_list([{dc1, 14}, {dc2, 15}]),
+    VC3 = vectorclock:from_list([{dc1, 10}, {dc2, 9}]),
+    VC4 = vectorclock:from_list([{dc1, 15}, {dc2, 16}]),
+    ?assertEqual(true, vc_in_range(VC, VC1, VC2)),
+    ?assertEqual(false, vc_in_range(VC3, VC1, VC2)),
+    ?assertEqual(false, vc_in_range(VC4, VC1, VC2)).
+
 
 -endif.
