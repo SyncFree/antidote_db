@@ -39,7 +39,7 @@
 
 %% Given a name, returns a new AntidoteDB (for now, only ElevelDB is supported)
 %% OpenOptions are set to use Antidote special comparator in the case of Eleveldb
--spec new(atom(), antidote_db_type()) -> {ok, antidote_db()} | {error, any()}.
+-spec new(string(), antidote_db_type()) -> {ok, antidote_db()} | {error, any()}.
 new(Name, Type) ->
     case Type of
         leveldb ->
