@@ -1,13 +1,15 @@
 {application, antidote_db,
- [
-  {description, "Antidote DataBase application"},
-  {vsn, "1"},
-  {registered, []},
-  {applications, [
-                  kernel,
-                  stdlib,
-                  eleveldb
-                 ]},
-  {mod, { antidote_db, []}},
-  {env, []}
- ]}.
+    [
+        {description, "Antidote DataBase application"},
+        {vsn, "1"},
+        {modules, [
+            antidote_db
+        ]},
+        {registered, []},
+        {applications, [
+            kernel,
+            stdlib,
+            eleveldb
+        ]},
+        {env, []}
+    ]}.
