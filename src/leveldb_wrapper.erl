@@ -40,7 +40,7 @@ get_snapshot(DB, Key, CommitTime) ->
     try
         eleveldb:fold(DB,
             fun({K, V}, AccIn) ->
-                {Key1, _MAX, _HASH, SNAP, VC} = binary_to_term(K),
+                {Key1, _MAX, _HASH, SNAP, _HASH2, VC} = binary_to_term(K),
                 case (Key1 == Key) of %% check same key
                     true ->
                         %% check it's a snapshot and has time less than the one required
@@ -71,7 +71,7 @@ get_snapshot(DB, Key, CommitTime) ->
 put_snapshot(DB, Key, Snapshot) ->
     VCDict = vectorclock_to_dict(Snapshot#materialized_snapshot.snapshot_time),
     put(DB, {binary_to_atom(Key), get_max_time_in_VC(VCDict),
-        erlang:phash2(VCDict), snap, vectorclock_to_list(VCDict)}, Snapshot).
+        erlang:phash2(VCDict), snap, erlang:phash2(erlang:now()), vectorclock_to_list(VCDict)}, Snapshot).
 
 %% Returns a list of operations that have commit time in the range (VCFrom, VCTo].
 %% In other words, it returns all ops which have a VectorClock concurrent or larger
@@ -94,7 +94,7 @@ get_ops(DB, Key, VCFrom, VCTo) ->
     try
         eleveldb:fold(DB,
             fun({K, V}, AccIn) ->
-                {Key1, MAX, _HASH, OP, VC1} = binary_to_term(K),
+                {Key1, MAX, _HASH, OP, _HASH2, VC1} = binary_to_term(K),
                 VC1Dict = vectorclock:from_list(VC1),
                 case Key == Key1 of
                     true ->
