@@ -2,14 +2,12 @@
     [
         {description, "Antidote DataBase application"},
         {vsn, "1"},
-        {modules, [
-            antidote_db
-        ]},
         {registered, []},
         {applications, [
             kernel,
             stdlib,
             eleveldb
         ]},
+        {mod, { antidote_db, []}},
         {env, []}
     ]}.

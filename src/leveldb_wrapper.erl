@@ -172,7 +172,7 @@ vc_in_range(VC, VCFrom, VCTo) ->
 put_op(DB, Key, VC, Record) ->
     VCDict = vectorclock_to_dict(VC),
     put(DB, {binary_to_atom(Key), get_max_time_in_VC(VCDict),
-        erlang:phash2(VCDict), op, vectorclock_to_list(VC)}, Record).
+        erlang:phash2(VCDict), op, erlang:phash2(erlang:now()), vectorclock_to_list(VC)}, Record).
 
 vectorclock_to_dict(VC) ->
     case is_list(VC) of
