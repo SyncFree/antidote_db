@@ -205,7 +205,7 @@ put(DB, Key, Value) ->
                 true -> Value;
                 false -> term_to_binary(Value)
             end,
-    eleveldb:put(DB, AKey, ATerm, []).
+    eleveldb:put(DB, AKey, ATerm, [{sync, true}]).
 
 -ifdef(TEST).
 
